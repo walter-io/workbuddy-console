@@ -35,6 +35,7 @@ import {
 import { del, get, patch, post, TIMEOUT } from '../lib/api';
 import { BRAND_MARKS } from '../lib/modelBrands';
 import { CROSS_ACCOUNT_OPS_REASON, CROSS_ACCOUNT_SESSION_OPS_DISABLED } from '../lib/riskGates';
+import { BanRiskGuide } from '../components/BanRiskGuide';
 import { fmtDateTime } from '../lib/format';
 import type {
   AccountBalancesResponse,
@@ -407,6 +408,7 @@ function AccountCard({
   onRename,
   onDelete,
   onShowPackages,
+  onOpenRiskGuide,
 }: {
   account: AccountInfo;
   isCurrent: boolean;
@@ -424,6 +426,8 @@ function AccountCard({
   onRename: () => void;
   onDelete: () => void;
   onShowPackages: () => void;
+  /** 打开「申诉与风险指引」弹层（限制徽章点击） */
+  onOpenRiskGuide: () => void;
 }) {
   /**
    * 凭据状态：以**服务端验活结论**为准（定时巡检每 6 小时刷新一次，结果落盘）。
@@ -482,9 +486,14 @@ function AccountCard({
                 </Badge>
               )}
               {account.restriction && (
-                <Badge color="red" dot>
-                  官方已限制（{account.restriction.code}）
-                </Badge>
+                <button
+                  type="button"
+                  onClick={() => onOpenRiskGuide()}
+                  title="该账号已被官方限制。点击查看申诉教程与官方入口"
+                  className="cursor-pointer"
+                >
+                  <Badge color="red" dot>官方已限制（{account.restriction.code}）· 点此申诉</Badge>
+                </button>
               )}
             </div>
             <p className="mt-0.5 truncate font-mono text-xs leading-5 text-zinc-400" title={account.uid}>
@@ -1939,6 +1948,8 @@ export default function AccountsPage() {
   const [pkgTarget, setPkgTarget] = useState<AccountInfo | null>(null);
   /** 扫码添加账号弹窗（OAuth 设备码流程） */
   const [scanOpen, setScanOpen] = useState(false);
+  /** 申诉与风险指引弹层（限制徽章点击 / 页头按钮共用） */
+  const [riskGuideOpen, setRiskGuideOpen] = useState(false);
   /** 档位筛选：与 workbuddy-switch 一致，两套登录态分开管理 */
   const [variant, setVariant] = useState<'cn' | 'ai'>('cn');
   // 记录当前档位，供同步会话/切换账号弹窗在请求里带上（跨档位搬运靠它判断源）
@@ -2588,6 +2599,14 @@ export default function AccountsPage() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
+              variant="subtle"
+              className="h-9 px-3.5"
+              onClick={() => setRiskGuideOpen(true)}
+              title="账号被封了？申诉教程与官方入口；各功能的风控风险点与已内置的防御"
+            >
+              申诉与风险指引
+            </Button>
+            <Button
               variant="primary"
               className="h-9 px-3.5"
               onClick={() => setScanOpen(true)}
@@ -2760,6 +2779,7 @@ export default function AccountsPage() {
                 onRefreshToken={() => doRefreshToken(a)}
                 onDelete={() => doDelete(a)}
                 onShowPackages={() => setPkgTarget(a)}
+                onOpenRiskGuide={() => setRiskGuideOpen(true)}
               />
             ))}
           </div>
@@ -2800,6 +2820,7 @@ export default function AccountsPage() {
           void loadBalances(true);
         }}
       />
+      <BanRiskGuide open={riskGuideOpen} onClose={() => setRiskGuideOpen(false)} />
     </div>
   );
 }

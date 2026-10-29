@@ -26,6 +26,7 @@ import {
 import { get, post, put, TIMEOUT } from '../lib/api';
 import { fmtDateTime, fmtNumber, fmtRelative } from '../lib/format';
 import { explainUpstreamError } from '../lib/proxyHelp';
+import { BanRiskGuide } from '../components/BanRiskGuide';
 import type { ProxyStatus, ProxyTestResult } from '../lib/types';
 
 /**
@@ -317,6 +318,8 @@ export default function ProxyPage() {
   const [plainKey, setPlainKey] = useState('');
   /** 一键体检（小白向）：全链路自检结果 */
   const [doctoring, setDoctoring] = useState(false);
+  /** 申诉与风险指引弹层（风险横幅入口） */
+  const [riskGuideOpen, setRiskGuideOpen] = useState(false);
   interface DoctorCheck { id: string; ok: boolean; label: string; detail: string; fix: string }
   interface DoctorResult { ok: boolean; summary: string; checks: DoctorCheck[] }
   const [doctor, setDoctor] = useState<DoctorResult | null>(null);
@@ -568,8 +571,16 @@ export default function ProxyPage() {
             <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs leading-5 text-amber-800">
               <b>封号风险提示（2026-10 用户实测）</b>：反代流量的请求节奏与官方客户端存在差异，高频 / 大批量使用
               仍可能被上游风控判定并封禁关联账号（同机账号会被连坐）。本工具已内置防御：同一账号的请求串行且
-              间隔至少 3 秒、全局并发上限 2、设备指纹与官方客户端对齐——但<b>无法保证完全规避</b>。请控制用量、
-              避免长时间高并发跑批，重要账号不要接入代理池。
+              间隔至少 3 秒、全局并发上限 2、单账号每日 500 次上限、设备指纹与官方客户端对齐——但<b>无法保证完全规避</b>。
+              请控制用量、避免长时间高并发跑批，重要账号不要接入代理池。
+              {(() => {
+                // 横幅内的申诉指引入口：直接打开共用弹层
+                return (
+                  <>
+                    {' '}账号已被限制？<button type="button" onClick={() => setRiskGuideOpen(true)} className="font-semibold underline hover:text-amber-900">看申诉教程与官方入口 →</button>
+                  </>
+                );
+              })()}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -839,6 +850,7 @@ export default function ProxyPage() {
           )}
         </Card>
       </PageSection>
+      <BanRiskGuide open={riskGuideOpen} onClose={() => setRiskGuideOpen(false)} />
     </div>
   );
 }
