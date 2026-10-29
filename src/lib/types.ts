@@ -869,6 +869,22 @@ export interface ProxyLog {
   path?: string | null;
 }
 
+/** 代理用量（按账号 × 近 7 天；OpenAI 流式透传拿不到 usage 帧，只计请求数） */
+export interface ProxyUsage {
+  day: string;
+  retentionDays: number;
+  note: string;
+  accounts: Array<{
+    accountId: string;
+    name: string;
+    requests: number;
+    promptTokens: number;
+    completionTokens: number;
+    today: { requests: number; promptTokens: number; completionTokens: number };
+  }>;
+  total: { requests: number; promptTokens: number; completionTokens: number };
+}
+
 export interface ProxyStatus {
   enabled: boolean;
   baseUrl: string;
@@ -883,6 +899,7 @@ export interface ProxyStatus {
   models: { ids: string[]; fetchedAt: number | null; error: string | null; account: string | null };
   stats: { total: number; ok: number; failed: number; lastAt: number | null };
   logs: ProxyLog[];
+  usage: ProxyUsage;
 }
 
 export interface ProxyTestResult {

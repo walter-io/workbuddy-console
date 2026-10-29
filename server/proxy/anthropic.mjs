@@ -245,7 +245,8 @@ const sse = (res, event, data) => res.write(`event: ${event}\ndata: ${JSON.strin
  * 块模型差异：OpenAI 是"一个 delta 里混着文本和工具分片"，Anthropic 是"编号 content block"。
  * 这里维护单调递增的块索引；文本块与每个工具调用各占一个块，切换前先关掉上一个。
  */
-export async function pipeAnthropicStream(frames, res, { model, signal } = {}) {
+// stats：出参对象，adapter 把上游 usage 写进 stats.usage 供记账
+export async function pipeAnthropicStream(frames, res, { model, signal, stats } = {}) {
   const messageId = newMsgId();
   let started = false;
   let nextIndex = 0;
@@ -301,6 +302,7 @@ export async function pipeAnthropicStream(frames, res, { model, signal } = {}) {
     startMessage();
     if (ev.model) model = model || ev.model;
     if (ev.usage) usage = ev.usage;
+    if (ev.usage && stats) stats.usage = { prompt_tokens: Number(ev.usage.prompt_tokens) || 0, completion_tokens: Number(ev.usage.completion_tokens) || 0 };
 
     // 文本
     if (ev.content) {

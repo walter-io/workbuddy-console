@@ -20,7 +20,7 @@ import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadConfig, saveConfigAsync, DEFAULT_PROXY } from '../store/config.mjs';
+import { loadConfig, saveConfigAsync, DEFAULT_PROXY, atomicWriteJsonAsync } from '../store/config.mjs';
 import { loadAccounts, accountMeta, secretValue, STORE_DIR } from '../workbuddy/accounts.mjs';
 import { variantOf, VARIANT_LIST, authFilePath } from '../workbuddy/variant.mjs';
 import { getAccountBalances } from '../workbuddy/credits.mjs';
@@ -374,6 +374,126 @@ export function noteAccountRestriction(accountId, text) {
 /** accountId → { code, at }（/api/accounts 用；只读视图） */
 export function restrictionMap() {
   return Object.fromEntries(accountRestrictions);
+}
+
+/* ------------------------------------------------------------------ *
+ * 用量记账（L5）：按「日 × 账号」累计请求数与 token 消耗，让用户能拿
+ * 官方用量明细对账、也能第一时间发现失控的 agent 循环。
+ * - 计数口径：出站成功 1 次 = 1 request；token 从上游 usage 帧取（流式透传
+ *   的 OpenAI 端点拿不到帧内容，只记请求数——界面如实说明）；
+ * - 持久化：~/.wb-switch/proxy-usage.json 保留 7 天，重启不清零；
+ * - 落盘走异步 + 串行链：记账发生在请求路径上，不允许同步写盘。
+ * ------------------------------------------------------------------ */
+const USAGE_FILE = path.join(STORE_DIR, 'proxy-usage.json');
+const USAGE_RETENTION_DAYS = 7;
+const usageMemory = new Map(); // `day|accountId` -> { requests, promptTokens, completionTokens, models: Map }
+let usageLoaded = false;
+let usageSaveChain = Promise.resolve();
+
+function usageDayKey(offset = 0) {
+  return new Date(Date.now() - offset * 86_400_000).toISOString().slice(0, 10);
+}
+
+function loadUsageOnce() {
+  if (usageLoaded) return;
+  usageLoaded = true;
+  try {
+    const raw = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8'));
+    for (const [key, v] of Object.entries(raw?.days || {})) {
+      if (!v || typeof v !== 'object') continue;
+      usageMemory.set(key, {
+        requests: Number(v.requests) || 0,
+        promptTokens: Number(v.promptTokens) || 0,
+        completionTokens: Number(v.completionTokens) || 0,
+        models: new Map(Object.entries(v.models || {}).map(([m, n]) => [m, Number(n) || 0])),
+      });
+    }
+  } catch {
+    /* 首次或损坏：从零开始（损坏的旧用量不值得阻断服务） */
+  }
+}
+
+function persistUsageSoon() {
+  usageSaveChain = usageSaveChain.then(async () => {
+    try {
+      const days = {};
+      const cutoff = usageDayKey(USAGE_RETENTION_DAYS);
+      for (const [key, v] of usageMemory) {
+        const day = key.split('|')[0];
+        if (day < cutoff) {
+          usageMemory.delete(key); // 顺带清理过期天
+          continue;
+        }
+        days[key] = {
+          requests: v.requests,
+          promptTokens: v.promptTokens,
+          completionTokens: v.completionTokens,
+          models: Object.fromEntries(v.models),
+        };
+      }
+      await atomicWriteJsonAsync(USAGE_FILE, { savedAt: Date.now(), days });
+    } catch {
+      /* 用量落盘是尽力而为：丢了只影响对账精度 */
+    }
+  });
+  return usageSaveChain;
+}
+
+/** 记一笔成功出站（requests 固定 1；tokens 可缺） */
+function markUsage(account, model, usage) {
+  loadUsageOnce();
+  const accountId = String(account?.id || account?.uid || '');
+  if (!accountId) return;
+  const key = `${usageDayKey()}|${accountId}`;
+  const rec =
+    usageMemory.get(key) || { requests: 0, promptTokens: 0, completionTokens: 0, models: new Map() };
+  rec.requests += 1;
+  rec.promptTokens += Number(usage?.prompt_tokens) || 0;
+  rec.completionTokens += Number(usage?.completion_tokens) || 0;
+  if (model) rec.models.set(String(model), (rec.models.get(String(model)) || 0) + 1);
+  usageMemory.set(key, rec);
+  persistUsageSoon();
+}
+
+/** 今日/近 7 天用量视图（/api/proxy/usage 用；名字按账号库现值解析） */
+export function usageView() {
+  loadUsageOnce();
+  const byAccount = new Map();
+  const today = usageDayKey();
+  let total = { requests: 0, promptTokens: 0, completionTokens: 0 };
+  for (const [key, v] of usageMemory) {
+    const [day, accountId] = key.split('|');
+    if (day < usageDayKey(USAGE_RETENTION_DAYS - 1)) continue;
+    const name = accountMeta(loadAccounts().find((a) => String(a?.id) === accountId) || {}).name || accountId.slice(0, 8);
+    const acc =
+      byAccount.get(accountId) || {
+        accountId,
+        name,
+        requests: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        today: { requests: 0, promptTokens: 0, completionTokens: 0 },
+      };
+    acc.requests += v.requests;
+    acc.promptTokens += v.promptTokens;
+    acc.completionTokens += v.completionTokens;
+    total.requests += v.requests;
+    total.promptTokens += v.promptTokens;
+    total.completionTokens += v.completionTokens;
+    if (day === today) {
+      acc.today.requests += v.requests;
+      acc.today.promptTokens += v.promptTokens;
+      acc.today.completionTokens += v.completionTokens;
+    }
+    byAccount.set(accountId, acc);
+  }
+  return {
+    day: today,
+    retentionDays: USAGE_RETENTION_DAYS,
+    note: 'OpenAI 端点的流式透传拿不到上游 usage 帧，该端点只计请求数；token 数以其余端点与非流式为准',
+    accounts: [...byAccount.values()].sort((a, b) => b.requests - a.requests),
+    total,
+  };
 }
 
 /**
@@ -788,8 +908,17 @@ async function handleChat(req, res) {
         }
         const out = await withAccountSlot(account, () => chatComplete(account, body, { timeoutMs, signal }));
         if (out.ok) {
+          // 非流式聚合结果里有上游 usage（aggregateSse 塞回）→ 顺手记账
+          let usage = null;
+          try {
+            const j = JSON.parse(out.text);
+            if (j?.usage) usage = { prompt_tokens: Number(j.usage.prompt_tokens) || 0, completion_tokens: Number(j.usage.completion_tokens) || 0 };
+          } catch {
+            /* 非 JSON 不记账 token，只记请求数 */
+          }
           summarizeLog();
           state.stats.ok += 1;
+          markUsage(account, String(body.model), usage);
           log({
             at: Date.now(),
             ok: true,
@@ -904,10 +1033,11 @@ const sseHeaders = (res) => {
   if (typeof res.flushHeaders === 'function') res.flushHeaders();
 };
 
-/** 结算一次成功请求（轮转指针前进 + 日志） */
-function markOk({ started, model, stream, account, status = 200, req }) {
+/** 结算一次成功请求（轮转指针前进 + 日志 + 用量记账） */
+function markOk({ started, model, stream, account, status = 200, req, usage = null }) {
   summarizeLog();
   state.stats.ok += 1;
+  markUsage(account, model, usage);
   log({
     at: Date.now(),
     ok: true,
@@ -1028,12 +1158,13 @@ async function handleMessages(req, res) {
       // open + pipe 整体占一个账号槽：流式在途的整段时间都算"该账号正在对话"，
       // 期间同一账号的新请求必须排队（官方客户端不可能同账号并行两路对话）
       let upErr = null;
+      const stats = {}; // adapter 出参：上游 usage 帧写这里，成功路径随 markOk 记账
       try {
         upErr = await withAccountSlot(account, async () => {
           const up = await openUpstreamStream(account, upstream, { signal });
           sseHeaders(res);
           try {
-            return await pipeAnthropicStream(up.frames, res, { model: upstream.model, signal });
+            return await pipeAnthropicStream(up.frames, res, { model: upstream.model, signal, stats });
           } catch (pipeErr) {
             if (!signal.aborted && !res.writableEnded) {
               res.write(
@@ -1057,7 +1188,7 @@ async function handleMessages(req, res) {
         capture11128('messages', upstream, [upErr]);
         noteAccountRestriction(account.id, upErr);
       } else {
-        markOk({ started, model: upstream.model, stream: true, account, req });
+        markOk({ started, model: upstream.model, stream: true, account, req, usage: stats?.usage || null });
       }
       return 'done';
     }
@@ -1117,12 +1248,13 @@ async function handleResponses(req, res) {
     if (isStream) {
       // 同 handleMessages：open + pipe 整体占账号槽
       let upErr = null;
+      const stats = {}; // adapter 出参：上游 usage 帧写这里，成功路径随 markOk 记账
       try {
         upErr = await withAccountSlot(account, async () => {
           const up = await openUpstreamStream(account, upstream, { signal });
           sseHeaders(res);
           try {
-            return await pipeResponsesStream(up.frames, res, { model: upstream.model, signal });
+            return await pipeResponsesStream(up.frames, res, { model: upstream.model, signal, stats });
           } catch (pipeErr) {
             if (!signal.aborted && !res.writableEnded) {
               res.write(
@@ -1145,7 +1277,7 @@ async function handleResponses(req, res) {
         capture11128('responses', upstream, [upErr]);
         noteAccountRestriction(account.id, upErr);
       } else {
-        markOk({ started, model: upstream.model, stream: true, account, req });
+        markOk({ started, model: upstream.model, stream: true, account, req, usage: stats?.usage || null });
       }
       return 'done';
     }
@@ -1228,12 +1360,13 @@ async function handleGemini(req, res) {
     if (isStream) {
       // 同 handleMessages：open + pipe 整体占账号槽
       let upErr = null;
+      const stats = {}; // adapter 出参：上游 usage 帧写这里，成功路径随 markOk 记账
       try {
         upErr = await withAccountSlot(account, async () => {
           const up = await openUpstreamStream(account, upstream, { signal });
           sseHeaders(res);
           try {
-            return await pipeGeminiStream(up.frames, res, { model: upstream.model, signal });
+            return await pipeGeminiStream(up.frames, res, { model: upstream.model, signal, stats });
           } catch (pipeErr) {
             if (!signal.aborted && !res.writableEnded) {
               res.write(
@@ -1255,7 +1388,7 @@ async function handleGemini(req, res) {
         capture11128('gemini', upstream, [upErr]);
         noteAccountRestriction(account.id, upErr);
       } else {
-        markOk({ started, model: upstream.model, stream: true, account, req });
+        markOk({ started, model: upstream.model, stream: true, account, req, usage: stats?.usage || null });
       }
       return 'done';
     }
@@ -1392,6 +1525,7 @@ function publicStatus(port, { reveal = false } = {}) {
     models: state.models,
     stats: state.stats,
     logs: state.logs.slice(0, 50),
+    usage: usageView(),
   };
 }
 
@@ -1562,6 +1696,9 @@ export function registerProxyRoutes(app, { port }) {
   app.post('/api/proxy/models/refresh', wrap(async (req, res) => res.json(await refreshModelsCache())));
 
   app.get('/api/proxy/logs', (req, res) => res.json({ logs: state.logs.slice(0, 200) }));
+
+  // 用量记账：按账号的请求/token 汇总（近 7 天），供界面「今日用量」与积分对账
+  app.get('/api/proxy/usage', (req, res) => res.json(usageView()));
 
   /**
    * 连通性自检：发一条极短的非流式请求，验证「Key → 账号 → 官方接口」整条链路。

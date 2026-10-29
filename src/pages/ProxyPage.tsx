@@ -791,6 +791,60 @@ export default function ProxyPage() {
         </Card>
       </PageSection>
 
+      {/* 今日用量：对账积分 / 发现失控循环 */}
+      <PageSection
+        icon={<IconLoader />}
+        title="用量（近 7 天）"
+        count={data.usage.total.requests ? `${fmtNumber(data.usage.total.requests)} 次` : undefined}
+        desc={data.usage.note}
+      >
+        <Card>
+          {data.usage.accounts.length === 0 ? (
+            <EmptyState icon={<IconLoader />} title="还没有用量记录" desc="代理出站成功后会按账号累计请求数与 token 消耗" />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-zinc-100 text-left text-xs text-zinc-400">
+                    <th className="px-4 py-2 font-medium">账号</th>
+                    <th className="px-4 py-2 text-right font-medium">今日请求</th>
+                    <th className="px-4 py-2 text-right font-medium">今日输入 tokens</th>
+                    <th className="px-4 py-2 text-right font-medium">今日输出 tokens</th>
+                    <th className="px-4 py-2 text-right font-medium">7 天请求</th>
+                    <th className="px-4 py-2 text-right font-medium">7 天 tokens（入/出）</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.usage.accounts.map((a) => (
+                    <tr key={a.accountId} className="border-b border-zinc-50 hover:bg-zinc-50/60 transition-colors">
+                      <td className="px-4 py-2 text-sm text-zinc-800">{a.name}</td>
+                      <td className="px-4 py-2 text-right text-xs tabular-nums text-zinc-700">{fmtNumber(a.today.requests)}</td>
+                      <td className="px-4 py-2 text-right text-xs tabular-nums text-zinc-600">{fmtNumber(a.today.promptTokens)}</td>
+                      <td className="px-4 py-2 text-right text-xs tabular-nums text-zinc-600">{fmtNumber(a.today.completionTokens)}</td>
+                      <td className="px-4 py-2 text-right text-xs tabular-nums text-zinc-500">{fmtNumber(a.requests)}</td>
+                      <td className="px-4 py-2 text-right text-xs tabular-nums text-zinc-500">
+                        {fmtNumber(a.promptTokens)} / {fmtNumber(a.completionTokens)}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr className="text-xs font-semibold text-zinc-800">
+                    <td className="px-4 py-2">合计</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{fmtNumber(data.usage.total.requests)}</td>
+                    <td colSpan={2} className="px-4 py-2 text-right tabular-nums text-zinc-600">
+                      今日 {fmtNumber(data.usage.accounts.reduce((s, a) => s + a.today.promptTokens + a.today.completionTokens, 0))} tokens
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums text-zinc-600">{fmtNumber(data.usage.total.requests)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums text-zinc-600">
+                      {fmtNumber(data.usage.total.promptTokens)} / {fmtNumber(data.usage.total.completionTokens)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      </PageSection>
+
       {/* 请求日志 */}
       <PageSection
         icon={<IconLoader />}

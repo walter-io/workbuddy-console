@@ -204,7 +204,8 @@ const sse = (res, event, data) => res.write(`event: ${event}\ndata: ${JSON.strin
  * 文本走 message item + output_text.delta；工具调用走 function_call item +
  * function_call_arguments.delta，两种 item 各自占用递增的 output_index。
  */
-export async function pipeResponsesStream(frames, res, { model, signal } = {}) {
+// stats：出参对象，adapter 把上游 usage 写进 stats.usage 供记账
+export async function pipeResponsesStream(frames, res, { model, signal, stats } = {}) {
   const responseId = newRespId();
   const createdAt = Math.floor(Date.now() / 1000);
   let seq = 0;
@@ -276,6 +277,7 @@ export async function pipeResponsesStream(frames, res, { model, signal } = {}) {
 
     if (ev.model) model = model || ev.model;
     if (ev.usage) usage = ev.usage;
+    if (ev.usage && stats) stats.usage = { prompt_tokens: Number(ev.usage.prompt_tokens) || 0, completion_tokens: Number(ev.usage.completion_tokens) || 0 };
 
     if (ev.content) {
       openTextItem();

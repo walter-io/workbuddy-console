@@ -265,7 +265,8 @@ const sse = (res, obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
  * 这里累积到流末尾再一次性发出完整 functionCall；最后补一个只带
  * finishReason + usageMetadata 的收尾 chunk（Gemini 原生也是这个形状）。
  */
-export async function pipeGeminiStream(frames, res, { model, signal } = {}) {
+// stats：出参对象，adapter 把上游 usage 写进 stats.usage 供记账
+export async function pipeGeminiStream(frames, res, { model, signal, stats } = {}) {
   let modelVersion = model || '';
   let finishReason = null;
   let usage = null;
@@ -289,6 +290,7 @@ export async function pipeGeminiStream(frames, res, { model, signal } = {}) {
 
     if (ev.model) modelVersion = modelVersion || ev.model;
     if (ev.usage) usage = ev.usage;
+    if (ev.usage && stats) stats.usage = { prompt_tokens: Number(ev.usage.prompt_tokens) || 0, completion_tokens: Number(ev.usage.completion_tokens) || 0 };
 
     if (ev.content) {
       emitted = true;
