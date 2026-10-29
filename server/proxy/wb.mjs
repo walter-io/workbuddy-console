@@ -16,10 +16,42 @@ import { execFile } from 'node:child_process';
 import { loadAccounts, saveAccountsAsync, secretValue, STORE_DIR } from '../workbuddy/accounts.mjs';
 import { variantOf } from '../workbuddy/variant.mjs';
 import { syncTokensToAuthFile } from '../workbuddy/auth.mjs';
+import { findWorkbuddyExe } from '../targets/workbuddy.mjs';
 
-/** 出站客户端版本段（对齐官方桌面端分发包，可调） */
-const CLIENT_VERSION = '5.5.4';
+/**
+ * 出站客户端版本：**运行时探测本机安装的 WorkBuddy 实际版本**（exe FileVersion），
+ * 探测不到才回落默认值。此前写死 5.5.4，而本机实际安装 5.3.11——同一台设备的
+ * 官方客户端与控制台出站版本不一致，是可关联的差异信号（每台机器版本还各不相同）。
+ * 与真机 MachineGuid 同一哲学：出站身份与真实环境一致。
+ */
+const CLIENT_VERSION_FALLBACK = '5.5.4';
 const CLI_VERSION = '2.137.1';
+let _clientVersion = null;
+async function clientVersionOnce() {
+  if (_clientVersion) return _clientVersion;
+  try {
+    const exe = findWorkbuddyExe();
+    if (exe) {
+      const v = await new Promise((resolve) => {
+        execFile(
+          'powershell.exe',
+          ['-NoProfile', '-Command', `(Get-Item -LiteralPath '${String(exe).replace(/'/g, "''")}').VersionInfo.FileVersion`],
+          { timeout: 8000, windowsHide: true },
+          (err, stdout) => resolve(err ? null : String(stdout || '').trim())
+        );
+      });
+      if (/^\d+(\.\d+)+$/.test(v || '')) {
+        _clientVersion = v;
+        console.log(`[wb] 出站客户端版本对齐本机安装版本：${v}`);
+        return v;
+      }
+    }
+  } catch {
+    /* 探测失败回落默认 */
+  }
+  _clientVersion = CLIENT_VERSION_FALLBACK;
+  return _clientVersion;
+}
 
 /**
  * chat 域按档位分流：国内版走 copilot.tencent.com（官网域 www.codebuddy.cn 不放行 /v2/chat），
@@ -116,9 +148,9 @@ async function machineIdOnce() {
 /** 会话标识：官方语义为「客户端本次会话」，每进程一个（重启更换），与账号无关 */
 const SESSION_ID = crypto.randomUUID();
 
-function userAgent(variant) {
+function userAgent(variant, clientVersion) {
   const platform = variant === 'ai' ? 'WorkBuddy AI' : 'WorkBuddy';
-  return `WorkBuddy/${CLIENT_VERSION} ${platform}/${CLIENT_VERSION} CLI/${CLI_VERSION}`;
+  return `WorkBuddy/${clientVersion} ${platform}/${clientVersion} CLI/${CLI_VERSION}`;
 }
 
 /**
@@ -126,6 +158,7 @@ function userAgent(variant) {
  * isStream 时 Accept 要声明 event-stream，否则上游可能直接返回非流式。
  */
 export async function chatHeaders(account, { isStream = false } = {}) {
+  const clientVersion = await clientVersionOnce();
   const variant = variantOf(account).id;
   const token = typeof secretValue(account, 'access_token') === 'string' ? secretValue(account, 'access_token') : '';
   const uid = String(account?.uid || '');
@@ -136,7 +169,7 @@ export async function chatHeaders(account, { isStream = false } = {}) {
     'X-Requested-With': 'XMLHttpRequest',
     Origin: origin,
     Referer: `${origin}/`,
-    'User-Agent': userAgent(variant),
+    'User-Agent': userAgent(variant, clientVersion),
     'X-CodeBuddy-Request': '1',
     'Accept-Language': variant === 'ai' ? 'en-US' : 'zh-CN',
   };
@@ -166,7 +199,7 @@ export async function chatHeaders(account, { isStream = false } = {}) {
   h['X-Agent-Purpose'] = 'conversation';
   h['X-IDE-Name'] = 'WorkBuddy';
   h['X-IDE-Type'] = 'WorkBuddy';
-  h['X-IDE-Version'] = CLIENT_VERSION;
+  h['X-IDE-Version'] = clientVersion;
   h['X-Product'] = 'WorkBuddy';
   // 会话头族：一次请求内所有重试复用同一 conversationRequestId
   const reqId = newId();
@@ -182,7 +215,7 @@ export async function chatHeaders(account, { isStream = false } = {}) {
 }
 
 /** 刷新 access token（X-Refresh-Token 只允许出现在 refresh 端点） */
-function refreshHeaders(account) {
+function refreshHeaders(account, clientVersion) {
   const variant = variantOf(account).id;
   const origin = originFor(variant);
   return {
@@ -191,7 +224,7 @@ function refreshHeaders(account) {
     'X-Requested-With': 'XMLHttpRequest',
     Origin: origin,
     Referer: `${origin}/`,
-    'User-Agent': userAgent(variant),
+    'User-Agent': userAgent(variant, clientVersion),
     'X-CodeBuddy-Request': '1',
     'X-Refresh-Token': String(secretValue(account, 'refresh_token') || ''),
     'X-Auth-Refresh-Source': 'plugin',
@@ -211,7 +244,7 @@ async function doRefreshAccessToken(account, { timeoutMs = 30_000 } = {}) {
   const variant = variantOf(account).id;
   const res = await fetch(chatBase(variant) + REFRESH_PATH, {
     method: 'POST',
-    headers: refreshHeaders(account),
+    headers: refreshHeaders(account, await clientVersionOnce()),
     body: '{}',
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -295,14 +328,65 @@ const refreshInFlight = new Map();
 let refreshSaveChain = Promise.resolve();
 
 /**
- * 刷新 access_token（带并发去重）。
+ * 凭据刷新熔断器：refresh_token 已死（invalid_grant）的账号留在池里时，此前**每个**
+ * 代理请求都会先拿死 token 去撞一次官方鉴权接口——短时间高频的失效 token 重放
+ * 在鉴权侧是典型的攻击特征，很可能加速连坐判定。连续失败 2 次即熔断 15 分钟，
+ * 期间直接快速失败（错误信息说明原因），不再发网络请求；成功后计数清零。
+ */
+const REFRESH_BREAKER_THRESHOLD = 2;
+const REFRESH_BREAKER_MS = 15 * 60_000;
+const refreshFailures = new Map(); // accountId -> { count, blockedUntil }
+
+function refreshBlocked(accountId) {
+  const st = refreshFailures.get(accountId);
+  return st && st.blockedUntil > Date.now() ? st : null;
+}
+
+function noteRefreshResult(accountId, ok) {
+  if (!accountId) return;
+  if (ok) {
+    refreshFailures.delete(accountId);
+    return;
+  }
+  const st = refreshFailures.get(accountId) || { count: 0, blockedUntil: 0 };
+  st.count += 1;
+  if (st.count >= REFRESH_BREAKER_THRESHOLD) {
+    st.blockedUntil = Date.now() + REFRESH_BREAKER_MS;
+    console.log(
+      `[wb] 账号 ${String(accountId).slice(0, 8)} 凭据连续刷新失败 ${st.count} 次，熔断 ${REFRESH_BREAKER_MS / 60000} 分钟（避免反复用失效 token 撞官方鉴权接口）`
+    );
+  }
+  refreshFailures.set(accountId, st);
+}
+
+/**
+ * 刷新 access_token（带并发去重 + 熔断）。
  * 同一账号并发调用复用同一次网络请求；不同账号的落库按序执行（见 refreshSaveChain）。
  */
 export function refreshAccessToken(account, opts = {}) {
   const key = String(account?.id || account?.uid || '');
+  const blocked = refreshBlocked(key);
+  if (blocked) {
+    const mins = Math.ceil((blocked.blockedUntil - Date.now()) / 60000);
+    return Promise.reject(
+      new Error(
+        `该账号凭据此前连续刷新失败，已熔断（还需 ${mins} 分钟）。` +
+          'refresh_token 大概率已失效：请在 WorkBuddy 里重新登录该账号后重新导入'
+      )
+    );
+  }
   const prev = refreshInFlight.get(key);
   if (prev) return prev;
-  const p = doRefreshAccessToken(account, opts).finally(() => refreshInFlight.delete(key));
+  const p = doRefreshAccessToken(account, opts)
+    .then((v) => {
+      noteRefreshResult(key, true);
+      return v;
+    })
+    .catch((e) => {
+      noteRefreshResult(key, false);
+      throw e;
+    })
+    .finally(() => refreshInFlight.delete(key));
   refreshInFlight.set(key, p);
   return p;
 }

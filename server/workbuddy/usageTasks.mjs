@@ -77,6 +77,25 @@ export const MAX_CHATS_PER_TASK = 10;
  * 取 20~45s 随机：一次任务的几次补聊总共几分钟，巡检本身每小时才有一次，可接受。 */
 const CHAT_INTERVAL_MS = () => 20_000 + Math.floor(Math.random() * 25_000);
 
+/** 每账号每日合成聊天总量上限：同一段固定文本的机器对话是 ML 侧最容易聚类的
+ * 自动化特征，量越大越危险。单任务上限 10 次之外，这里再加「当日总量 ≤20 次」
+ * 的硬闸——多任务叠加时优先保账号安全（内存态，重启清零可接受） */
+const DAILY_CHAT_CAP = 20;
+const dailyChatCount = new Map(); // `day|accountId` -> number
+
+function bumpDailyChats(accountId) {
+  const key = `${new Date().toISOString().slice(0, 10)}|${accountId}`;
+  const n = (dailyChatCount.get(key) || 0) + 1;
+  dailyChatCount.set(key, n);
+  if (dailyChatCount.size > 64) for (const k of dailyChatCount.keys()) if (!k.startsWith(new Date().toISOString().slice(0, 10))) dailyChatCount.delete(k);
+  return n;
+}
+
+/** 测试钩子：清空每日合成聊天计数（test-growth 的桩场景彼此独立，需要复用配额） */
+export function __resetDailyChatCount() {
+  dailyChatCount.clear();
+}
+
 /** 对话内容固定寒暄——inputTrunc 会进官方用量明细，不放任何隐私 */
 const CHAT_PROMPT = '你好，请用一句话打个招呼。';
 const CHAT_MAX_TOKENS = 256;
@@ -191,6 +210,12 @@ export async function completeChatTasks(account, backlog, { systemProxy } = {}) 
       if (remaining <= 0) break;
       let usedThis = 0;
       while (remaining > 0) {
+        // 每日总量硬闸：到顶就收手，任务留到明天（账号安全优先于奖励）
+        if (bumpDailyChats(account.id) > DAILY_CHAT_CAP) {
+          parts.push(`今日补对话已达保护上限（${DAILY_CHAT_CAP} 次/账号），剩余留到明天`);
+          remaining = 0;
+          break;
+        }
         const r = await sendGrowthChat(account, model, netOpts);
         if (!r.ok) {
           // 当前模型不可用：换下一个候选。首个请求就失败说明模型本身不可用，

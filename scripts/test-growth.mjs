@@ -30,7 +30,7 @@ fs.mkdirSync(process.env.WB_SWITCH_HOME, { recursive: true });
 fs.mkdirSync(process.env.FREE_TOKEN_CONFIG_DIR, { recursive: true });
 
 const { makeupCandidates, runGrowthForAccount, dig, MAKEUP_MAX_PER_RUN } = await import('../server/workbuddy/growth.mjs');
-const { chatTaskBacklog, completeChatTasks, FREE_MODELS, MODEL_CANDIDATES, GROWTH_EVENT_CODE, MAX_CHATS_PER_TASK } = await import('../server/workbuddy/usageTasks.mjs');
+const { chatTaskBacklog, completeChatTasks, FREE_MODELS, MODEL_CANDIDATES, GROWTH_EVENT_CODE, MAX_CHATS_PER_TASK, __resetDailyChatCount } = await import('../server/workbuddy/usageTasks.mjs');
 
 /**
  * 出站必须走 fetch 桩：先清掉代理环境变量，再传 systemProxy:false 跳过 Windows 系统代理探测。
@@ -463,6 +463,8 @@ section('9. 模型回退：免费模型 5xx/429 换下一个，全灭才用低�
 // ---------------------------------------------------------------- 10. 对话补全的失控保险
 section('10. 失控保险：目标虚高时单任务封顶；模型全灭计失败不抛错');
 {
+  // 每日合成聊天上限（20 次/账号）是进程内累计的：前面场景已消耗部分配额，清零后再测
+  __resetDailyChatCount();
   let n = 0;
   stubFetch({
     ...quietRoutes(),
