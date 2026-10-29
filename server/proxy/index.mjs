@@ -892,6 +892,8 @@ async function handleChat(req, res) {
           }
           summarizeLog();
           state.stats.ok += 1;
+          // 流式透传拿不到 usage 帧：只记请求数（口径见「用量」面板说明）
+          markUsage(account, String(body.model), null);
           log({
             at: Date.now(),
             ok: true,
@@ -1202,7 +1204,7 @@ async function handleMessages(req, res) {
         return { error: '上游响应解析失败' };
       }
       res.json(buildAnthropicMessage(parsed, upstream.model));
-      markOk({ started, model: upstream.model, stream: false, account, req });
+      markOk({ started, model: upstream.model, stream: false, account, req, usage: parsed?.usage || null });
       return 'done';
     }
     if ((out.status === 401 || out.status === 403) && attempt === 0) return 'retry-auth';
@@ -1291,7 +1293,7 @@ async function handleResponses(req, res) {
         return { error: '上游响应解析失败' };
       }
       res.json(buildResponsesReply(parsed, upstream.model));
-      markOk({ started, model: upstream.model, stream: false, account, req });
+      markOk({ started, model: upstream.model, stream: false, account, req, usage: parsed?.usage || null });
       return 'done';
     }
     if ((out.status === 401 || out.status === 403) && attempt === 0) return 'retry-auth';
@@ -1402,7 +1404,7 @@ async function handleGemini(req, res) {
         return { error: '上游响应解析失败' };
       }
       res.json(buildGeminiResponse(parsed, upstream.model));
-      markOk({ started, model: upstream.model, stream: false, account, req });
+      markOk({ started, model: upstream.model, stream: false, account, req, usage: parsed?.usage || null });
       return 'done';
     }
     if ((out.status === 401 || out.status === 403) && attempt === 0) return 'retry-auth';
