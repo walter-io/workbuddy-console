@@ -242,11 +242,27 @@ export default function StatsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range, model, variant]);
 
-  // 定时刷新：每 60 秒静默更新当前筛选下的统计
+  // 定时刷新：每 60 秒静默更新当前筛选下的统计。
+  // 串行自重排 + 页面不可见暂停：stats 冷扫描可能超过 60s 间隔，setInterval 会叠加
+  // 并发请求（seqRef 只防乱序不防堆叠）
   useEffect(() => {
     if (!autoRefresh) return;
-    const t = setInterval(() => load('silent'), 60_000);
-    return () => clearInterval(t);
+    let stopped = false;
+    let timer: number | undefined;
+    const tick = () => {
+      if (document.hidden) {
+        timer = window.setTimeout(tick, 60_000);
+        return;
+      }
+      void load('silent').finally(() => {
+        if (!stopped) timer = window.setTimeout(tick, 60_000);
+      });
+    };
+    timer = window.setTimeout(tick, 60_000);
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [autoRefresh, load]);
 
   const topModelsForChart = useMemo(() => (data?.models || []).slice(0, 8).map((m) => m.name), [data]);

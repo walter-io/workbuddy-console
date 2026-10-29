@@ -245,8 +245,24 @@ export default function QuotaPage({ active = true, onGoKeys }: { active?: boolea
 
   useEffect(() => {
     if (!autoRefresh) return;
-    const t = setInterval(() => load(false), 60_000);
-    return () => clearInterval(t);
+    // 串行自重排 + 页面不可见暂停：setInterval 在请求超时（90s）大于间隔（60s）时
+    // 会叠加并发；且额度接口实时透传打真实平台，标签页切走仍每分钟白打
+    let stopped = false;
+    let timer: number | undefined;
+    const tick = () => {
+      if (document.hidden) {
+        timer = window.setTimeout(tick, 60_000);
+        return;
+      }
+      void load(false).finally(() => {
+        if (!stopped) timer = window.setTimeout(tick, 60_000);
+      });
+    };
+    timer = window.setTimeout(tick, 60_000);
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [autoRefresh, load]);
 
   const groups = data?.platforms || [];

@@ -16,6 +16,14 @@ export interface ErrorAdvice {
 
 const RULES: Array<{ re: RegExp; advice: ErrorAdvice }> = [
   {
+    re: /今日上游请求已达上限|DailyCapError/i,
+    advice: {
+      what: '本工具的每日保护上限触发了（单账号每日请求过多）',
+      todo: '这是保护不是故障：该账号今日暂停出站，明日自动恢复。若非你主动为之，说明某个 agent 在失控重试，请检查其配置',
+      level: 'warn',
+    },
+  },
+  {
     re: /11140|unusual activity|has been restricted/i,
     advice: {
       what: '账号已被官方限制（风控判定异常活动）',

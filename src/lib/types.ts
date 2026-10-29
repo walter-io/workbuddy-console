@@ -845,6 +845,8 @@ export interface ProxyAccount {
   selected: boolean;
   /** 是否为桌面端当前登录账号（该账号不参与代理出站，避免上游风控连坐官方客户端） */
   isCurrentLogin: boolean;
+  /** 官方风控限制记录（11140/11128），与账号页徽章同源 */
+  restriction?: { code: number; at: number } | null;
 }
 
 export interface ProxyLog {

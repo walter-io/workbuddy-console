@@ -531,6 +531,11 @@ export default function ProxyPage() {
                 />
                 <span className="min-w-0 flex-1 truncate text-sm text-zinc-800">{a.name}</span>
                 <Badge color="gray">{a.variantLabel}</Badge>
+                {a.restriction && (
+                  <Badge color="red" dot>
+                    官方已限制（{a.restriction.code}）
+                  </Badge>
+                )}
                 {a.isCurrentLogin && (
                   <Badge color="blue" dot>
                     桌面端登录中 · 不参与出站
@@ -610,14 +615,22 @@ export default function ProxyPage() {
               {doctor.summary}
             </div>
             <div className="mt-2 space-y-1.5">
-              {doctor.checks.map((c) => (
-                <div key={c.id} className="flex flex-wrap items-baseline gap-x-2 text-xs">
-                  <span className={c.ok ? 'text-emerald-600' : 'text-red-600'}>{c.ok ? '✓' : '✗'}</span>
-                  <span className="font-medium text-zinc-700">{c.label}</span>
-                  <span className="text-zinc-500">{c.detail}</span>
-                  {c.fix && <span className="text-amber-700">→ {c.fix}</span>}
-                </div>
-              ))}
+              {doctor.checks.map((c) => {
+                const adv = !c.ok ? explainUpstreamError(c.detail) : null;
+                return (
+                  <div key={c.id} className="flex flex-wrap items-baseline gap-x-2 text-xs">
+                    <span className={c.ok ? 'text-emerald-600' : 'text-red-600'}>{c.ok ? '✓' : '✗'}</span>
+                    <span className="font-medium text-zinc-700">{c.label}</span>
+                    <span className="text-zinc-500">{c.detail}</span>
+                    {adv && (
+                      <span className={adv.level === 'danger' ? 'text-red-700' : 'text-zinc-600'}>
+                        （{adv.what}：{adv.todo}）
+                      </span>
+                    )}
+                    {c.fix && <span className="text-amber-700">→ {c.fix}</span>}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

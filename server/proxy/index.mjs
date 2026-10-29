@@ -1358,6 +1358,7 @@ function publicStatus(port, { reveal = false } = {}) {
   const stored = cfg.proxy?.accountIds;
   const selected = Array.isArray(stored) ? stored : loadAccounts().map((a) => a?.id).filter(Boolean);
   const loginUids = currentLoginUids();
+  const restrictions = restrictionMap();
   const accounts = loadAccounts().map((a) => {
     const meta = accountMeta(a);
     const usable = canEgress(a);
@@ -1373,6 +1374,8 @@ function publicStatus(port, { reveal = false } = {}) {
       selected: selected.length ? selected.includes(meta.id) : true,
       // 桌面端当前登录的账号：即使勾选了也不在池里（poolAccounts 强制排除），界面据此禁勾并打标
       isCurrentLogin: !!(meta.uid && loginUids.has(String(meta.uid))),
+      // 官方限制记录（11140/11128）：池列表直接打红标，与账号页徽章同源
+      restriction: restrictions[meta.id] || null,
     };
   });
   return {
