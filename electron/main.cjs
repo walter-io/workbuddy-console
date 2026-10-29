@@ -146,13 +146,33 @@ async function createWindow() {
 
   win.once('ready-to-show', () => win.show());
 
-  // 平台官网等外链用系统浏览器打开
+  // 平台官网等外链用系统浏览器打开；mailto: 等协议交给系统默认处理
+  // （此前只放行 https?:，mailto: 走 deny 分支被静默吞掉——申诉指引里的
+  // 「直接打开邮件编辑」点了没反应，2026-10-30 用户实测）
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url) && !url.startsWith('http://127.0.0.1')) {
       shell.openExternal(url);
       return { action: 'deny' };
     }
+    if (/^mailto:/i.test(url)) {
+      shell.openExternal(url);
+      return { action: 'deny' };
+    }
     return { action: 'allow' };
+  });
+
+  // 兜底：SPA 窗口内本不该发生外部导航；万一发生（如 mailto: 被当成导航）同样外放，
+  // 并阻止它替换掉控制台页面
+  win.webContents.on('will-navigate', (e, url) => {
+    if (/^mailto:/i.test(url)) {
+      e.preventDefault();
+      shell.openExternal(url);
+      return;
+    }
+    if (/^https?:/i.test(url) && !url.startsWith('http://127.0.0.1')) {
+      e.preventDefault();
+      shell.openExternal(url);
+    }
   });
 
   // 点关闭按钮 → 缩到托盘（自动签到需要进程常驻）；真正退出走托盘菜单

@@ -133,6 +133,16 @@ export function BanRiskGuide({
               <a
                 className="text-xs text-indigo-600 hover:underline"
                 href={`mailto:${SUPPORT_MAIL}?subject=${encodeURIComponent('账号异常限制申诉')}`}
+                onClick={(e) => {
+                  // Electron 里 <a href="mailto:"> 曾被窗口 open-handler 静默吞掉（点了没反应）。
+                  // 统一走 window.open：桌面壳内由 openExternal 兜底交给系统邮件客户端，
+                  // 浏览器直连场景行为不变（main.cjs 两处均已放行，这里是双保险）
+                  e.preventDefault();
+                  window.open(
+                    `mailto:${SUPPORT_MAIL}?subject=${encodeURIComponent('账号异常限制申诉')}`,
+                    '_blank'
+                  );
+                }}
               >
                 或直接打开邮件编辑 ↗
               </a>
