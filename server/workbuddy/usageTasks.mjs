@@ -72,7 +72,10 @@ const CHAT_TASK_RE = /^chat_/;
 export const MAX_CHATS_PER_TASK = 10;
 
 /** 两次对话之间的间隔：太快像刷量，没必要 */
-const CHAT_INTERVAL_MS = 1200;
+/** 补对话的节奏：官方语义是"用户聊天 N 次"，人类两次对话之间隔着几十秒到几分钟。
+ * 此前固定 1.2s 连发（同内容、同节奏）是教科书级机器特征（2026-10 封号反馈后改）。
+ * 取 20~45s 随机：一次任务的几次补聊总共几分钟，巡检本身每小时才有一次，可接受。 */
+const CHAT_INTERVAL_MS = () => 20_000 + Math.floor(Math.random() * 25_000);
 
 /** 对话内容固定寒暄——inputTrunc 会进官方用量明细，不放任何隐私 */
 const CHAT_PROMPT = '你好，请用一句话打个招呼。';
@@ -204,7 +207,7 @@ export async function completeChatTasks(account, backlog, { systemProxy } = {}) 
         usedThis += 1;
         changed = true;
         if (!modelsUsed.includes(model)) modelsUsed.push(model);
-        if (remaining > 0) await sleep(CHAT_INTERVAL_MS);
+        if (remaining > 0) await sleep(CHAT_INTERVAL_MS());
       }
     }
 

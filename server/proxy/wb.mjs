@@ -10,7 +10,10 @@
  * - 绝不跨档位请求：国内版只打 copilot.tencent.com，国际版只打 www.workbuddy.ai。
  */
 import crypto from 'node:crypto';
-import { loadAccounts, saveAccountsAsync, secretValue } from '../workbuddy/accounts.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { loadAccounts, saveAccountsAsync, secretValue, STORE_DIR } from '../workbuddy/accounts.mjs';
 import { variantOf } from '../workbuddy/variant.mjs';
 import { syncTokensToAuthFile } from '../workbuddy/auth.mjs';
 
@@ -50,10 +53,68 @@ function newId() {
   return crypto.randomBytes(16).toString('hex');
 }
 
-/** 按 uid 稳定派生设备/会话标识（跨重启恒定，避免多号被风控按设备漂移关联） */
+/** 按 uid 稳定派生标识（仅剩非设备语义的用途；设备/会话标识已改用真机身份，见下） */
 function stableId(uid, purpose) {
   return crypto.createHash('sha256').update(`wb2a:${purpose}:${uid || ''}`).digest('hex').slice(0, 36);
 }
+
+/**
+ * 真机设备身份（与官方客户端同源同值）：
+ * 官方 CLI 的 machineId = Windows 注册表 HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid
+ * （反编译 codebuddy.js 实证：winUuid = reg query ... MachineGuid），**所有账号共用**。
+ * 此前这里按账号 uid 伪造每账号一个"设备 ID"——服务端视角变成「同 IP 下 N 台设备各挂
+ * 一个账号」的批量养号特征，与 2026-10 反馈的连坐封号高度吻合。改为真机 GUID 后，
+ * 出站身份与事实一致：一台设备（官方多账号功能本就支持）、每个账号自己的 uid。
+ * 读取失败时退回 ~/.wb-switch/device.json 里的稳定 UUID（同为"本机一个身份"语义）。
+ */
+const MACHINE_ID_FILE = path.join(STORE_DIR, 'device.json');
+
+function readWindowsMachineGuid() {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32') return resolve(null);
+    execFile(
+      'reg.exe',
+      ['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid'],
+      { timeout: 5000, windowsHide: true },
+      (err, stdout) => {
+        if (err) return resolve(null);
+        const m = String(stdout || '').match(/MachineGuid\s+REG_SZ\s+(\S+)/);
+        resolve(m ? m[1] : null);
+      }
+    );
+  });
+}
+
+let _machineId = null;
+async function machineIdOnce() {
+  if (_machineId) return _machineId;
+  const guid = await readWindowsMachineGuid();
+  if (guid) {
+    _machineId = guid;
+    return guid;
+  }
+  // 兜底：本机一个稳定 UUID（落盘，跨重启恒定）
+  try {
+    fs.mkdirSync(path.dirname(MACHINE_ID_FILE), { recursive: true });
+    const raw = JSON.parse(fs.readFileSync(MACHINE_ID_FILE, 'utf8'));
+    if (raw?.id) {
+      _machineId = String(raw.id);
+      return _machineId;
+    }
+  } catch {
+    /* 不存在则新建 */
+  }
+  _machineId = crypto.randomUUID();
+  try {
+    fs.writeFileSync(MACHINE_ID_FILE, JSON.stringify({ id: _machineId, at: Date.now() }, null, 2));
+  } catch {
+    /* 写不进就进程内使用 */
+  }
+  return _machineId;
+}
+
+/** 会话标识：官方语义为「客户端本次会话」，每进程一个（重启更换），与账号无关 */
+const SESSION_ID = crypto.randomUUID();
 
 function userAgent(variant) {
   const platform = variant === 'ai' ? 'WorkBuddy AI' : 'WorkBuddy';
@@ -64,7 +125,7 @@ function userAgent(variant) {
  * 组装 chat 出站头。uid/enterpriseId/domain 全部来自账号库，不额外存储副本。
  * isStream 时 Accept 要声明 event-stream，否则上游可能直接返回非流式。
  */
-export function chatHeaders(account, { isStream = false } = {}) {
+export async function chatHeaders(account, { isStream = false } = {}) {
   const variant = variantOf(account).id;
   const token = typeof secretValue(account, 'access_token') === 'string' ? secretValue(account, 'access_token') : '';
   const uid = String(account?.uid || '');
@@ -83,8 +144,10 @@ export function chatHeaders(account, { isStream = false } = {}) {
   else h['X-No-Authorization'] = '1';
   if (uid) {
     h['X-User-Id'] = uid;
-    h['X-Machine-ID'] = stableId(uid, 'machine');
-    h['X-Session-ID'] = stableId(uid, 'session');
+    // 设备/会话标识用真机身份（见 machineIdOnce 注释）：官方客户端一台机器上所有
+    // 账号发同一个 MachineGuid；按账号伪造不同设备 ID 是批量养号特征（封号连坐）
+    h['X-Machine-ID'] = await machineIdOnce();
+    h['X-Session-ID'] = SESSION_ID;
   } else {
     h['X-No-User-Id'] = '1';
   }
@@ -253,7 +316,7 @@ export async function fetchUpstreamModels(account, { timeoutMs = 20_000 } = {}) 
   const variant = variantOf(account).id;
   const res = await fetch(chatBase(variant) + MODELS_PATH, {
     method: 'GET',
-    headers: chatHeaders(account),
+    headers: await chatHeaders(account),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text();
@@ -432,7 +495,7 @@ export async function openUpstreamStream(account, body, { headerTimeoutMs = 60_0
   try {
     res = await fetch(chatBase(variant) + CHAT_PATH, {
       method: 'POST',
-      headers: chatHeaders(account, { isStream: true }),
+      headers: await chatHeaders(account, { isStream: true }),
       body: JSON.stringify({ ...body, stream: true }),
       signal: ctrl.signal,
     });
@@ -504,7 +567,7 @@ export async function chatComplete(account, body, { timeoutMs = 120_000, headerT
   try {
     res = await fetch(chatBase(variant) + CHAT_PATH, {
       method: 'POST',
-      headers: chatHeaders(account, { isStream: true }),
+      headers: await chatHeaders(account, { isStream: true }),
       body: JSON.stringify(upstreamBody),
       signal: ctrl.signal,
     });

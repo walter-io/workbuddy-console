@@ -51,6 +51,16 @@ export const DEFAULT_PROXY = {
   accountIds: null,
   /** 非流式请求的整段超时；流式响应只受 60s 首字节超时约束，不会被硬掐 */
   timeoutMs: 120_000,
+  /**
+   * 风控节流（2026-10 用户连坐封号后的防御性默认值）：
+   * - minIntervalMs：同一账号两次上游请求的最小间隔。官方桌面端是人类操作节奏，
+   *   同账号请求背靠背连发是明显机器特征；
+   * - maxConcurrent：全局同时在途的上游 chat 请求数上限。官方客户端同一时刻
+   *   基本只有一个对话在跑；agent 并发狂打多个账号同样高危。
+   * 调大需自担风险；0/负值按默认值处理（不允许完全关闭节流）。
+   */
+  minIntervalMs: 3_000,
+  maxConcurrent: 2,
 };
 
 const DEFAULT_CONFIG = {

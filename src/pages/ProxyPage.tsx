@@ -539,6 +539,12 @@ export default function ProxyPage() {
               桌面端当前登录的账号会自动排除在池外，
               避免同一账号被上游风控连坐（11128）导致官方客户端不可用。
             </p>
+            <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs leading-5 text-amber-800">
+              <b>封号风险提示（2026-10 用户实测）</b>：反代流量的请求节奏与官方客户端存在差异，高频 / 大批量使用
+              仍可能被上游风控判定并封禁关联账号（同机账号会被连坐）。本工具已内置防御：同一账号的请求串行且
+              间隔至少 3 秒、全局并发上限 2、设备指纹与官方客户端对齐——但<b>无法保证完全规避</b>。请控制用量、
+              避免长时间高并发跑批，重要账号不要接入代理池。
+            </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex items-center gap-2 text-sm text-zinc-600 cursor-pointer select-none">

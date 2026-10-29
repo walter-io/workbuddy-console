@@ -146,6 +146,8 @@ async function assertAppClosed() {
  * （排队等一小时不如让用户稍后再点）；dryRun 只读、随时可跑，不占锁。
  */
 let sessionOpBusy = false;
+/** 上次切换账号的时刻（冷却用；进程内即可——重启后冷却自然清零可接受） */
+let lastSwitchAt = 0;
 async function withSessionOpLock(fn) {
   if (sessionOpBusy) {
     throw Object.assign(new Error('已有会话整理操作在执行中（同步 / 去重 / 搬家），请等它完成后再操作'), { status: 409 });
@@ -809,6 +811,22 @@ app.post(
     if (!target) return res.status(400).json({ error: '账号不存在' });
 
     /**
+     * 风控冷却：短时间高频切号（杀进程/换登录态/触发客户端重新鉴权）是明显的
+     * 异常信号，2026-10 用户反馈连坐封号后加的防御。3 分钟内只允许切一次，
+     * 无论上次成败（失败重试同样占冷却——连续失败重试更是高危行为）。
+     * force=true 可跳过（界面无此入口，留给出问题时的应急）。
+     */
+    const SWITCH_COOLDOWN_MS = 180_000;
+    if (!req.body?.force && lastSwitchAt && Date.now() - lastSwitchAt < SWITCH_COOLDOWN_MS) {
+      const waitSec = Math.ceil((SWITCH_COOLDOWN_MS - (Date.now() - lastSwitchAt)) / 1000);
+      throw Object.assign(
+        new Error(`距上次切换账号还不足 3 分钟（还需等 ${waitSec} 秒）。高频切号是风控高危行为，请稍后再试`),
+        { status: 429 }
+      );
+    }
+    lastSwitchAt = Date.now(); // 通过冷却门即打点：无论本次成败，失败后连续重试同样是高危行为
+
+    /**
      * 0) 凭据验活兜底：本机「未过期」不代表服务端认可。
      *
      * 验活本身已经由**定时巡检**负责（每 6 小时一次，结论落盘），这里只是切换前的
@@ -896,8 +914,13 @@ app.post(
        * 1.5) 自动增量同步：把「此前复制过、目标账号里副本仍存在」的会话自动并入本次切换，
        *      与用户手动勾选的会话**合并**（不是二选一——2026-10-21 用户实测：手动勾了 4 个，
        *      其余 38 个已复制会话全被跳过，改名与内容都没跟过去）。只补已有副本，绝不产生新会话。
+       *
+       *      ⚠️ 风控总闸（CROSS_ACCOUNT_SESSION_OPS=false，2026-10-29 实测连坐封号）：
+       *      总闸关闭时跳过 autoSync **并忽略 copySessionIds**——此前只闸了独立入口，
+       *      切号这条最高频的路仍在自动重放历史复制过的会话（用户"没勾选也封号"即此：
+       *      autoSync 默认开，账本里 38 个旧副本每次切号都重放）。
        */
-      if (req.body?.autoSync !== false) {
+      if (CROSS_ACCOUNT_SESSION_OPS && req.body?.autoSync !== false) {
         try {
           for (const sid of await sessionIdsNeedingSync({ targetAccountId: id })) {
             if (!ids.includes(sid)) ids.push(sid);
@@ -905,18 +928,24 @@ app.post(
         } catch {
           /* 源目标相同、档位不支持等：安静跳过，按「无会话需同步」处理 */
         }
+      } else if (!CROSS_ACCOUNT_SESSION_OPS && ids.length) {
+        console.log(`[switch] 风控总闸关闭：忽略 ${ids.length} 个 copySessionIds（跨账号会话重放已停用）`);
+        ids.length = 0;
       }
 
-      // 2) 搬家：勾了「同时复制会话」就只搬勾选的（含此前已同步过的），没勾才整包搬
+      // 2) 搬家：勾了「同时复制会话」就只搬勾选的（含此前已同步过的），没勾才整包搬。
+      //    总闸关闭时整个跳过：切号退化为纯「写登录态 + 重启」，零跨账号会话写入
       let sessionCopy = null;
-      try {
-        sessionCopy = await moveSessionsToAccount({
-          targetAccountId: id,
-          ids: ids.length ? ids : null,
-          sourceVariant: ['cn', 'ai'].includes(String(req.body?.sourceVariant)) ? String(req.body.sourceVariant) : null,
-        });
-      } catch (err) {
-        throw Object.assign(new Error(`会话搬家失败，已中止切换：${err?.message || err}`), { status: 400 });
+      if (CROSS_ACCOUNT_SESSION_OPS) {
+        try {
+          sessionCopy = await moveSessionsToAccount({
+            targetAccountId: id,
+            ids: ids.length ? ids : null,
+            sourceVariant: ['cn', 'ai'].includes(String(req.body?.sourceVariant)) ? String(req.body.sourceVariant) : null,
+          });
+        } catch (err) {
+          throw Object.assign(new Error(`会话搬家失败，已中止切换：${err?.message || err}`), { status: 400 });
+        }
       }
 
       // 3) 写登录态；无论成败都不把用户的应用留在"被关掉"的状态

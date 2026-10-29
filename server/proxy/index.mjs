@@ -293,6 +293,71 @@ export function needsRefresh(account) {
  * 不设上限时池大的客户端要干等数分钟（M4）。超预算返回已收集的错误 */
 const REQUEST_BUDGET_MS = 240_000;
 
+/* ------------------------------------------------------------------ *
+ * 风控节流层（2026-10 用户连坐封号后的防御性改造）
+ *
+ * 官方桌面端的真实行为模式：同一账号同一时刻只有一个对话在跑、请求之间隔着
+ * 人类操作的秒级间隙。此前的反代是"agent 形态"：并发请求可以同时砸向同一个
+ * 账号、同一账号的请求背靠背零间隔——都是教科书级的机器特征。
+ *
+ * withAccountSlot 提供两层约束（配置 proxy.minIntervalMs / maxConcurrent）：
+ * 1. 账号级串行链 + 最小间隔：同一账号的上游请求排队执行，间隔不足自动补等待；
+ * 2. 全局并发上限：在途请求数超过上限时排队等待。
+ * ------------------------------------------------------------------ */
+const accountChains = new Map(); // accountId -> Promise（串行链尾）
+const lastUpstreamAt = new Map(); // accountId -> 上次出站时刻
+let inFlight = 0;
+const waiters = [];
+
+function acquireGlobalSlot() {
+  const cfg = loadConfig();
+  const max = Math.max(1, Number(cfg.proxy?.maxConcurrent) || 2);
+  if (inFlight < max) {
+    inFlight += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => waiters.push(resolve));
+}
+
+function releaseGlobalSlot() {
+  const next = waiters.shift();
+  if (next) next(); // 名额直接移交，inFlight 不变
+  else inFlight = Math.max(0, inFlight - 1);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 在账号槽位内执行 fn（真正打上游的部分）。
+ * 排队期间客户端断开也不会"跳号"——名额语义必须严格进出配对。
+ */
+async function withAccountSlot(account, fn) {
+  const key = String(account?.id || account?.uid || '');
+  const prev = accountChains.get(key) || Promise.resolve();
+  let run;
+  const chain = prev.then(
+    () =>
+      new Promise((res) => {
+        run = res;
+      })
+  );
+  accountChains.set(key, chain);
+  await prev; // 等前面的出站动作完成（含它的最小间隔）
+  await acquireGlobalSlot();
+  try {
+    const cfg = loadConfig();
+    const minGap = Math.max(0, Number(cfg.proxy?.minIntervalMs) || 0);
+    const last = lastUpstreamAt.get(key) || 0;
+    const wait = last + minGap - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastUpstreamAt.set(key, Date.now());
+    return await fn();
+  } finally {
+    releaseGlobalSlot();
+    run(); // 放行该账号链上的下一个
+  }
+}
+
 /**
  * 流式透传时顺带扫描上游 in-band 错误帧（11128/11102/14003…）：
  * 不改变字节流，只把命中的错误文本记到 scan.error。此前 handleChat 的流式是纯透传，
@@ -595,22 +660,25 @@ async function handleChat(req, res) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         if (attempt === 0 && needsRefresh(account)) await refreshAccessToken(account);
-        const out = await chatComplete(account, body, { timeoutMs, signal });
-        if (out.ok) {
-          if (isStream) {
-            // 流式的成败要等流走完才知道（断流 / 中途错误帧），不能上来就记成功（M1）
-            const scan = { error: null };
-            res.status(out.status);
+        if (isStream) {
+          // 流式：上游请求 + 透传整个流都占账号槽（同账号在流期间不许并行第二路）
+          const scan = { error: null };
+          let pipeFailed = null;
+          const out = await withAccountSlot(account, async () => {
+            const o = await chatComplete(account, body, { timeoutMs, signal });
+            if (!o.ok) return o;
+            res.status(o.status);
             res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
             res.setHeader('Cache-Control', 'no-cache');
             res.setHeader('Connection', 'keep-alive');
             res.setHeader('X-Accel-Buffering', 'no');
             try {
-              await pipeStream(scanUpstreamErrors(out.stream, scan), res);
+              await pipeStream(scanUpstreamErrors(o.stream, scan), res);
             } catch (pipeErr) {
               // 头已发出：必须写一帧 OpenAI 形状的错误再收尾（H5 后半）——此前异常
               // 冒泡到 wrap，res.status(500).json() 的裸 JSON 被 end 进 SSE 流，
               // 客户端既看不到错误帧也等不到 [DONE]
+              pipeFailed = pipeErr;
               if (!res.writableEnded) {
                 res.write(
                   `data: ${JSON.stringify({
@@ -620,41 +688,48 @@ async function handleChat(req, res) {
                 res.write('data: [DONE]\n\n');
                 res.end();
               }
-              summarizeLog();
-              state.stats.failed += 1;
-              res.locals.proxyLogged = true;
-              const msg = `上游流中断：${pipeErr?.message || pipeErr}`;
-              if (isQuotaError(msg)) markCooldown(account.id, String(body.model));
-              capture11128('chat', body, [msg]);
-              log({ at: Date.now(), ok: false, status: 502, model: String(body.model), stream: true, account: accountMeta(account).name, ms: Date.now() - started, error: msg.slice(0, 300), ua: uaOf(req), auth: authLabel(req), path: pathOf(req) });
-              return; // 响应已终止，绝不能再换下一个账号
             }
-            if (scan.error) {
-              // 上游 200 但 SSE 里夹了错误帧：此前被记成功、不冷却、不采样（M1/M3）
-              summarizeLog();
-              state.stats.failed += 1;
-              res.locals.proxyLogged = true;
-              if (isQuotaError(scan.error)) markCooldown(account.id, String(body.model));
-              capture11128('chat', body, [scan.error]);
-              log({ at: Date.now(), ok: false, status: 200, model: String(body.model), stream: true, account: accountMeta(account).name, ms: Date.now() - started, error: scan.error.slice(0, 300), ua: uaOf(req), auth: authLabel(req), path: pathOf(req) });
-              return;
+            return o;
+          });
+          if (!out.ok) {
+            // 401/403：先刷新再试一次同一账号；其它错误直接换号（走下方统一失败处理）
+            if ((out.status === 401 || out.status === 403) && attempt === 0) {
+              await refreshAccessToken(account).catch(() => {});
+              continue;
             }
-            summarizeLog();
-            state.stats.ok += 1;
-            log({
-              at: Date.now(),
-              ok: true,
-              status: out.status,
-              model: String(body.model),
-              stream: true,
-              account: accountMeta(account).name,
-              ms: Date.now() - started,
-              ua: uaOf(req),
-              auth: authLabel(req),
-              path: pathOf(req),
-            });
-            return;
+            if (out.status === 429 || isQuotaError(out.error)) markCooldown(account.id, String(body.model));
+            errors.push(`${accountMeta(account).name}: ${out.error || `HTTP ${out.status}`}`);
+            break;
           }
+          const streamErr = pipeFailed ? `上游流中断：${pipeFailed?.message || pipeFailed}` : scan.error;
+          if (streamErr) {
+            // 流中断 / 上游 200 但 SSE 里夹了错误帧：按失败记账（此前被记成功）
+            summarizeLog();
+            state.stats.failed += 1;
+            res.locals.proxyLogged = true;
+            if (isQuotaError(streamErr)) markCooldown(account.id, String(body.model));
+            capture11128('chat', body, [streamErr]);
+            log({ at: Date.now(), ok: false, status: pipeFailed ? 502 : 200, model: String(body.model), stream: true, account: accountMeta(account).name, ms: Date.now() - started, error: streamErr.slice(0, 300), ua: uaOf(req), auth: authLabel(req), path: pathOf(req) });
+            return; // 响应已终止，绝不能再换下一个账号
+          }
+          summarizeLog();
+          state.stats.ok += 1;
+          log({
+            at: Date.now(),
+            ok: true,
+            status: out.status,
+            model: String(body.model),
+            stream: true,
+            account: accountMeta(account).name,
+            ms: Date.now() - started,
+            ua: uaOf(req),
+            auth: authLabel(req),
+            path: pathOf(req),
+          });
+          return;
+        }
+        const out = await withAccountSlot(account, () => chatComplete(account, body, { timeoutMs, signal }));
+        if (out.ok) {
           summarizeLog();
           state.stats.ok += 1;
           log({
@@ -888,22 +963,30 @@ async function handleMessages(req, res) {
 
   const result = await runAcrossPool(orderPool(pool, upstream.model), async (account, attempt) => {
     if (isStream) {
-      const up = await openUpstreamStream(account, upstream, { signal });
-      sseHeaders(res);
+      // open + pipe 整体占一个账号槽：流式在途的整段时间都算"该账号正在对话"，
+      // 期间同一账号的新请求必须排队（官方客户端不可能同账号并行两路对话）
       let upErr = null;
       try {
-        upErr = await pipeAnthropicStream(up.frames, res, { model: upstream.model, signal });
-      } catch (pipeErr) {
-        if (!signal.aborted && !res.writableEnded) {
-          res.write(
-            `event: error\ndata: ${JSON.stringify({
-              type: 'error',
-              error: { type: 'api_error', message: String(pipeErr?.message || pipeErr) },
-            })}\n\n`
-          );
-          res.end();
-        }
-        upErr = String(pipeErr?.message || pipeErr); // 传输中断也按失败记账
+        upErr = await withAccountSlot(account, async () => {
+          const up = await openUpstreamStream(account, upstream, { signal });
+          sseHeaders(res);
+          try {
+            return await pipeAnthropicStream(up.frames, res, { model: upstream.model, signal });
+          } catch (pipeErr) {
+            if (!signal.aborted && !res.writableEnded) {
+              res.write(
+                `event: error\ndata: ${JSON.stringify({
+                  type: 'error',
+                  error: { type: 'api_error', message: String(pipeErr?.message || pipeErr) },
+                })}\n\n`
+              );
+              res.end();
+            }
+            return String(pipeErr?.message || pipeErr); // 传输中断也按失败记账
+          }
+        });
+      } catch (slotErr) {
+        upErr = String(slotErr?.message || slotErr);
       }
       if (upErr) {
         // 上游 in-band 错误帧或断流：此前无条件 markOk，失败被记成功、不冷却、不采样（M1）
@@ -916,7 +999,7 @@ async function handleMessages(req, res) {
       return 'done';
     }
 
-    const out = await chatComplete(account, upstream, { timeoutMs, signal });
+    const out = await withAccountSlot(account, () => chatComplete(account, upstream, { timeoutMs, signal }));
     if (out.ok) {
       let parsed;
       try {
@@ -969,22 +1052,29 @@ async function handleResponses(req, res) {
 
   const result = await runAcrossPool(orderPool(pool, upstream.model), async (account, attempt) => {
     if (isStream) {
-      const up = await openUpstreamStream(account, upstream, { signal });
-      sseHeaders(res);
+      // 同 handleMessages：open + pipe 整体占账号槽
       let upErr = null;
       try {
-        upErr = await pipeResponsesStream(up.frames, res, { model: upstream.model, signal });
-      } catch (pipeErr) {
-        if (!signal.aborted && !res.writableEnded) {
-          res.write(
-            `event: response.failed\ndata: ${JSON.stringify({
-              type: 'response.failed',
-              response: { id: 'resp_error', object: 'response', status: 'failed', error: { code: 'upstream_error', message: String(pipeErr?.message || pipeErr) } },
-            })}\n\n`
-          );
-          res.end();
-        }
-        upErr = String(pipeErr?.message || pipeErr); // 传输中断也按失败记账
+        upErr = await withAccountSlot(account, async () => {
+          const up = await openUpstreamStream(account, upstream, { signal });
+          sseHeaders(res);
+          try {
+            return await pipeResponsesStream(up.frames, res, { model: upstream.model, signal });
+          } catch (pipeErr) {
+            if (!signal.aborted && !res.writableEnded) {
+              res.write(
+                `event: response.failed\ndata: ${JSON.stringify({
+                  type: 'response.failed',
+                  response: { id: 'resp_error', object: 'response', status: 'failed', error: { code: 'upstream_error', message: String(pipeErr?.message || pipeErr) } },
+                })}\n\n`
+              );
+              res.end();
+            }
+            return String(pipeErr?.message || pipeErr); // 传输中断也按失败记账
+          }
+        });
+      } catch (slotErr) {
+        upErr = String(slotErr?.message || slotErr);
       }
       if (upErr) {
         markFailed(res, { started, model: upstream.model, stream: true, errors: [upErr] });
@@ -996,7 +1086,7 @@ async function handleResponses(req, res) {
       return 'done';
     }
 
-    const out = await chatComplete(account, upstream, { timeoutMs, signal });
+    const out = await withAccountSlot(account, () => chatComplete(account, upstream, { timeoutMs, signal }));
     if (out.ok) {
       let parsed;
       try {
@@ -1072,21 +1162,28 @@ async function handleGemini(req, res) {
 
   const result = await runAcrossPool(orderPool(pool, upstream.model), async (account, attempt) => {
     if (isStream) {
-      const up = await openUpstreamStream(account, upstream, { signal });
-      sseHeaders(res);
+      // 同 handleMessages：open + pipe 整体占账号槽
       let upErr = null;
       try {
-        upErr = await pipeGeminiStream(up.frames, res, { model: upstream.model, signal });
-      } catch (pipeErr) {
-        if (!signal.aborted && !res.writableEnded) {
-          res.write(
-            `data: ${JSON.stringify({
-              error: { code: 502, message: String(pipeErr?.message || pipeErr), status: 'INTERNAL' },
-            })}\n\n`
-          );
-          res.end();
-        }
-        upErr = String(pipeErr?.message || pipeErr); // 传输中断也按失败记账
+        upErr = await withAccountSlot(account, async () => {
+          const up = await openUpstreamStream(account, upstream, { signal });
+          sseHeaders(res);
+          try {
+            return await pipeGeminiStream(up.frames, res, { model: upstream.model, signal });
+          } catch (pipeErr) {
+            if (!signal.aborted && !res.writableEnded) {
+              res.write(
+                `data: ${JSON.stringify({
+                  error: { code: 502, message: String(pipeErr?.message || pipeErr), status: 'INTERNAL' },
+                })}\n\n`
+              );
+              res.end();
+            }
+            return String(pipeErr?.message || pipeErr); // 传输中断也按失败记账
+          }
+        });
+      } catch (slotErr) {
+        upErr = String(slotErr?.message || slotErr);
       }
       if (upErr) {
         markFailed(res, { started, model: upstream.model, stream: true, errors: [upErr] });
@@ -1098,7 +1195,7 @@ async function handleGemini(req, res) {
       return 'done';
     }
 
-    const out = await chatComplete(account, upstream, { timeoutMs, signal });
+    const out = await withAccountSlot(account, () => chatComplete(account, upstream, { timeoutMs, signal }));
     if (out.ok) {
       let parsed;
       try {
