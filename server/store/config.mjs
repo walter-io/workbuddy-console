@@ -61,6 +61,12 @@ export const DEFAULT_PROXY = {
    */
   minIntervalMs: 3_000,
   maxConcurrent: 2,
+  /**
+   * 单账号单日上游请求上限（风控兜底）：agent 的重试循环失控时，一个账号一天能被
+   * 打出数千次请求——积分烧穿之前先引来封号。默认 500（重度 agent 使用也够），
+   * 触顶后该账号当日拒绝服务并给出人话提示；次日自动重置。0/负值按默认处理。
+   */
+  dailyPerAccountCap: 500,
 };
 
 const DEFAULT_CONFIG = {

@@ -275,6 +275,11 @@ export interface AccountInfo {
    * 本地 expiresAt 只说明"没到时间"，不代表服务端还认——界面以这个为准。
    */
   verify?: CredentialVerifyState | null;
+  /**
+   * 官方风控限制记录（11140「异常活动受限」/11128），由代理链路捕获。
+   * 有值 = 该账号已被官方标记：停止一切自动化并考虑申诉。
+   */
+  restriction?: { code: number; at: number } | null;
 }
 
 /** 服务端验活结论（不含任何 token） */

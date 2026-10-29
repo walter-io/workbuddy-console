@@ -48,7 +48,7 @@ import {
   // 缺这行每次统计请求都会抛 ReferenceError（响应已发出，只在服务端日志里炸）
   prefetchCreditRanges,
 } from './workbuddy/credits.mjs';
-import { refreshAccessToken } from './proxy/wb.mjs';
+import { refreshAccessToken, chatComplete } from './proxy/wb.mjs';
 import { VARIANT_LIST, authFilePath, dataRoot } from './workbuddy/variant.mjs';
 import { checkinAll, checkinAccount, fetchCheckinStatus, loadCheckinLogs, allCheckedInToday, allGrowthDoneToday } from './workbuddy/checkin.mjs';
 import { fetchTravelStatus } from './workbuddy/growth.mjs';
@@ -68,7 +68,17 @@ import { checkForUpdate, LOCAL_VERSION } from './update.mjs';
 import { checkPermissions } from './workbuddy/diagnostics.mjs';
 import { listBackups, restoreBackup, deleteBackup, cleanBackups, backupVariants } from './workbuddy/backups.mjs';
 import { probeAllModelLimits } from './workbuddy/modelLimits.mjs';
-import { registerProxyRoutes, refreshModelsCache } from './proxy/index.mjs';
+import {
+  registerProxyRoutes,
+  refreshModelsCache,
+  restrictionMap,
+  noteAccountRestriction,
+  poolAccounts,
+  needsRefresh,
+  withAccountSlot,
+  modelsState,
+} from './proxy/index.mjs';
+import { pickTestModel } from './proxy/index.mjs';
 import { stopWorkbuddy, launchWorkbuddy } from './targets/workbuddy.mjs';
 import { listSessionsForSwitch, copySessions, moveSessionsToAccount, sessionIdsNeedingSync, syncAllAccounts, dedupeSessions, sessionDataRoot, copyVariantIntoAccount, currentUidOfVariant, warmSessionSignatures } from './workbuddy/sessions.mjs';
 
@@ -769,14 +779,114 @@ app.get(
  * accountsFile 指向 ~/.wb-switch/accounts.json（与 workbuddy-switch 共享同一份数据，
  * 两个工具互不干扰地读写，不会互相覆盖）。
  */
+/**
+ * 一键体检（小白向）：把「为什么用不了反代」的全链路一次查完，每项给结论 + 修法。
+ * 只读（除自检请求外不发上游 chat），失败项按依赖顺序给出第一条可操作建议。
+ */
+app.get(
+  '/api/proxy/doctor',
+  wrap(async (req, res) => {
+    const checks = [];
+    const add = (id, ok, label, detail, fix = '') => checks.push({ id, ok, label, detail, fix });
+
+    // 1) 服务与端口
+    add('service', true, '控制台服务', `运行中（端口 ${PORT}）`);
+
+    // 2) 代理开关与 Key
+    const cfg = loadConfig();
+    const proxyEnabled = !!cfg.proxy?.enabled;
+    add('enabled', proxyEnabled, '反向代理已开启', proxyEnabled ? '已开启' : '未开启', proxyEnabled ? '' : '到「反向代理」页打开总开关');
+    const hasKey = !!cfg.proxy?.apiKey;
+    add('key', hasKey, 'API Key 已配置', hasKey ? `已配置（尾号 ${String(cfg.proxy.apiKey).slice(-4)}）` : '未配置', hasKey ? '' : '开启代理时会自动生成；也可点「重新生成」');
+
+    // 3) 账号池
+    const pool = poolAccounts();
+    add('pool', pool.length > 0, '账号池', pool.length ? `${pool.length} 个账号参与轮换` : '为空', pool.length ? '' : '到「账号管理」扫码添加账号，并在反代页勾选参与轮换');
+    const restricted = restrictionMap();
+    const restrictedInPool = pool.filter((a) => restricted[a.id]);
+    if (pool.length && restrictedInPool.length) {
+      add(
+        'restricted',
+        false,
+        '账号被官方限制',
+        restrictedInPool.map((a) => accountMeta(a).name).join('、') + '（11140/11128）',
+        '把这些账号移出代理池；被限制的账号继续自动化会加重处罚，需走官方申诉'
+      );
+    } else {
+      add('restricted', true, '账号限制状态', '池内账号均无官方限制记录');
+    }
+
+    // 4) 凭据验活
+    const verified = loadCredentialStatus();
+    const dead = pool.filter((a) => {
+      const v = verified[a.id];
+      return v && v.at && !v.valid;
+    });
+    add(
+      'credentials',
+      dead.length === 0,
+      '凭据验活',
+      dead.length ? `${dead.map((a) => accountMeta(a).name).join('、')} 已失效` : `${pool.length} 个账号凭据均为最新有效`,
+      dead.length ? '对这些账号点「刷新凭据」；无效则重新扫码登录该账号' : ''
+    );
+
+    // 5) 模型清单
+    const models = modelsState();
+    const realModel = pickTestModel(models.ids);
+    add(
+      'models',
+      !!realModel,
+      '模型清单',
+      realModel ? `${models.ids.length} 个模型，推荐从 ${realModel}（免费）开始` : '清单为空或全是伪模型',
+      realModel ? '' : '到反代页点「刷新模型列表」；仍为空说明凭据或网络问题'
+    );
+
+    // 6) 上游连通性（真实链路，用免费模型发一条最小请求）
+    let upstreamOk = false;
+    let upstreamDetail = '未执行（账号池为空或有红项）';
+    let upstreamFix = '先解决上面的红项';
+    if (pool.length && realModel && !restrictedInPool.length && dead.length === 0) {
+      try {
+        const account = pool[0];
+        if (needsRefresh(account)) await refreshAccessToken(account).catch(() => {});
+        const out = await withAccountSlot(account, () =>
+          chatComplete(account, { model: realModel, messages: [{ role: 'user', content: 'ping' }], max_tokens: 16 }, { timeoutMs: 60_000 })
+        );
+        upstreamOk = !!out.ok;
+        upstreamDetail = upstreamOk ? '上游连通正常' : String(out.error || `HTTP ${out.status}`).slice(0, 160);
+        if (!upstreamOk) noteAccountRestriction(account.id, out.error); // 体检撞到限制也点亮账号页徽章
+        upstreamFix = upstreamOk ? '' : '见「报错对照表」；401/403 先刷新凭据，11140 表示账号被限制';
+      } catch (e) {
+        upstreamDetail = String(e?.message || e).slice(0, 160);
+        upstreamFix = '按「报错对照表」处理';
+      }
+    }
+    add('upstream', upstreamOk, '上游连通（真实请求）', upstreamDetail, upstreamFix);
+
+    const failed = checks.filter((c) => !c.ok);
+    res.json({
+      ok: failed.length === 0,
+      summary: failed.length ? `${failed.length} 项未通过，先处理：${failed[0].label}` : '全部通过，可以正常使用',
+      checks,
+    });
+  })
+);
+
 app.get('/api/accounts', (req, res) => {
   const accounts = loadAccounts();
   const current = detectCurrentAccount();
   // 附上最近一次验活结论：界面据此把「凭据有效」改成「服务端确认有效 / 已失效」，
   // 而不是只看本地有效期（2026-10-18 反馈：显示有效、切过去却登录过期）
   const verified = loadCredentialStatus();
+  // 附上代理链路捕获的官方限制（11140/11128）：界面据此打「已被官方限制」徽章，
+  // 让小白不用翻日志就知道"这个号还能不能用"
+  const restrictions = restrictionMap();
   res.json({
-    accounts: accounts.map((a) => ({ ...accountMeta(a), verify: verified[a.id] || null })),
+    accounts: accounts.map((a) => ({
+      ...accountMeta(a),
+      verify: verified[a.id] || null,
+      restriction: restrictions[a.id] || null,
+    })),
     current: {
       variant: current.variant,
       uid: current.uid,
@@ -1598,11 +1708,19 @@ async function runTokenRefreshPatrol({ silent = false } = {}) {
   }
 }
 
-/** 启动巡检：先延迟 60 秒（不与启动时的其它初始化抢网络），之后每 6 小时一次 */
+/** 启动巡检：先延迟 60 秒（不与启动时的其它初始化抢网络），之后每 6 小时一次。
+ * 每轮自重排 + ±8% 随机抖动：固定整点节奏本身就是可识别的自动化特征 */
 function startTokenRefreshPatrol() {
-  if (tokenRefreshTimer) clearInterval(tokenRefreshTimer);
+  if (tokenRefreshTimer) clearTimeout(tokenRefreshTimer);
+  const schedule = () => {
+    const jitter = TOKEN_REFRESH_PATROL_MS * (0.92 + Math.random() * 0.16);
+    tokenRefreshTimer = setTimeout(async () => {
+      await runTokenRefreshPatrol({ silent: true });
+      schedule();
+    }, jitter);
+  };
   setTimeout(() => runTokenRefreshPatrol({ silent: true }), 60_000);
-  tokenRefreshTimer = setInterval(runTokenRefreshPatrol, TOKEN_REFRESH_PATROL_MS);
+  schedule();
 }
 
 startTokenRefreshPatrol();
@@ -1696,9 +1814,17 @@ async function runCheckinPatrol({ ignoreQuietHours = false } = {}) {
  * 幂等门禁（今天已签到且成长任务已完成就直接返回）保证重复启动不会重复请求。
  */
 function startCheckinPatrol() {
-  if (checkinPatrolTimer) clearInterval(checkinPatrolTimer);
+  if (checkinPatrolTimer) clearTimeout(checkinPatrolTimer);
+  const schedule = () => {
+    // 每轮自重排 + ±8% 抖动：整点准点的批量请求是可识别的自动化特征（风控感知的是"群体同刻"）
+    const jitter = CHECKIN_PATROL_MS * (0.92 + Math.random() * 0.16);
+    checkinPatrolTimer = setTimeout(async () => {
+      await runCheckinPatrol();
+      schedule();
+    }, jitter);
+  };
   setTimeout(() => runCheckinPatrol({ ignoreQuietHours: true }), 30_000);
-  checkinPatrolTimer = setInterval(runCheckinPatrol, CHECKIN_PATROL_MS);
+  schedule();
 }
 
 startCheckinPatrol();

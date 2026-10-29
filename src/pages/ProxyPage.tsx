@@ -25,6 +25,7 @@ import {
 } from '../components/ui';
 import { get, post, put, TIMEOUT } from '../lib/api';
 import { fmtDateTime, fmtNumber, fmtRelative } from '../lib/format';
+import { explainUpstreamError } from '../lib/proxyHelp';
 import type { ProxyStatus, ProxyTestResult } from '../lib/types';
 
 /**
@@ -314,6 +315,25 @@ export default function ProxyPage() {
   const [testResult, setTestResult] = useState<ProxyTestResult | null>(null);
   /** 明文 Key：默认不下发，点「显示」时单独取一次（与模型页 Key 的显示口径一致） */
   const [plainKey, setPlainKey] = useState('');
+  /** 一键体检（小白向）：全链路自检结果 */
+  const [doctoring, setDoctoring] = useState(false);
+  interface DoctorCheck { id: string; ok: boolean; label: string; detail: string; fix: string }
+  interface DoctorResult { ok: boolean; summary: string; checks: DoctorCheck[] }
+  const [doctor, setDoctor] = useState<DoctorResult | null>(null);
+
+  const runDoctor = async () => {
+    setDoctoring(true);
+    setDoctor(null);
+    try {
+      const r = await get<DoctorResult>('/api/proxy/doctor', { timeoutMs: TIMEOUT.write });
+      setDoctor(r);
+      if (r.ok) toast('ok', r.summary);
+    } catch (e: any) {
+      toast('err', e?.message || '体检失败');
+    } finally {
+      setDoctoring(false);
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -435,7 +455,13 @@ export default function ProxyPage() {
   );
   // base 结尾带 /v1；root 去掉 /v1（Gemini CLI 等只填域名根）；model 取实拉到的第一个模型
   const rootUrl = (data?.baseUrl || '').replace(/\/v1$/, '');
-  const modelHint = data?.models.ids[0] || '<模型 ID>';
+  // 示例模型提示：清单首位常是伪模型 "auto"（会被上游路由到不可控的付费模型），
+  // 小白照抄配置就会烧积分。这里挑真实模型、优先免费（与服务端 pickTestModel 同口径）
+  const modelHint = useMemo(() => {
+    const ids = (data?.models.ids || []).map((m) => String(m || '').trim()).filter(Boolean);
+    const real = ids.filter((m) => !['auto', 'default'].includes(m.toLowerCase()));
+    return real.find((m) => /^hy3$/i.test(m)) || real.find((m) => /free|lite|flash/i.test(m)) || real[0] || '<模型 ID>';
+  }, [data?.models.ids]);
   const keyHint = plainKey || data?.keyPreview || '<开启后生成>';
   const protocolClients = useMemo(() => CLIENT_SAMPLES.filter((c) => c.protocol === protocol), [protocol]);
   const sample = protocolClients.find((c) => c.id === client) || protocolClients[0];
@@ -560,8 +586,30 @@ export default function ProxyPage() {
               <IconZap className="w-3.5 h-3.5" />
               连通性自检
             </Button>
+            <Button size="sm" variant="subtle" loading={doctoring} onClick={() => void runDoctor()}>
+              一键体检
+            </Button>
           </div>
         </div>
+
+        {doctor && (
+          <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
+            <div className={`text-xs font-semibold ${doctor.ok ? 'text-emerald-700' : 'text-amber-700'}`}>
+              {doctor.ok ? '✅ ' : '⚠️ '}
+              {doctor.summary}
+            </div>
+            <div className="mt-2 space-y-1.5">
+              {doctor.checks.map((c) => (
+                <div key={c.id} className="flex flex-wrap items-baseline gap-x-2 text-xs">
+                  <span className={c.ok ? 'text-emerald-600' : 'text-red-600'}>{c.ok ? '✓' : '✗'}</span>
+                  <span className="font-medium text-zinc-700">{c.label}</span>
+                  <span className="text-zinc-500">{c.detail}</span>
+                  {c.fix && <span className="text-amber-700">→ {c.fix}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="mt-4 grid gap-3 lg:grid-cols-2">
           <div>
@@ -773,6 +821,14 @@ export default function ProxyPage() {
                       ) : (
                         <span className="text-xs text-red-600" title={l.errorRaw || l.error}>
                           {l.error ? l.error.slice(0, 60) : l.status}
+                          {(() => {
+                            const adv = explainUpstreamError(l.errorRaw || l.error);
+                            return adv ? (
+                              <span className="mt-0.5 block text-[11px] font-normal text-zinc-500">
+                                {adv.level === 'danger' ? '⛔' : adv.level === 'warn' ? '⚠️' : 'ℹ️'} {adv.what}：{adv.todo}
+                              </span>
+                            ) : null;
+                          })()}
                         </span>
                       )}
                     </td>

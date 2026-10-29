@@ -481,6 +481,11 @@ function AccountCard({
                   使用中
                 </Badge>
               )}
+              {account.restriction && (
+                <Badge color="red" dot>
+                  官方已限制（{account.restriction.code}）
+                </Badge>
+              )}
             </div>
             <p className="mt-0.5 truncate font-mono text-xs leading-5 text-zinc-400" title={account.uid}>
               UID {account.uid}

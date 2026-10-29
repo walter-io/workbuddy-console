@@ -327,11 +327,61 @@ function releaseGlobalSlot() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* 每日每账号请求计数（风控兜底：agent 重试循环失控时保护账号与积分）。
+ * 内存态即可：重启清零可接受（上限本身是软保护）。键 = `${yyyy-mm-dd}|${accountId}` */
+const dailyCounts = new Map();
+function bumpDailyCount(accountId) {
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `${day}|${accountId}`;
+  const n = (dailyCounts.get(key) || 0) + 1;
+  dailyCounts.set(key, n);
+  // 跨天清理：只剩当天键，防 Map 无限增长
+  if (dailyCounts.size > 64) for (const k of dailyCounts.keys()) if (!k.startsWith(day)) dailyCounts.delete(k);
+  return n;
+}
+
+export class DailyCapError extends Error {
+  constructor(accountName, count) {
+    super(
+      `账号「${accountName}」今日上游请求已达上限，为保护账号暂停使用（明日自动恢复）。` +
+        '若非你主动为之，说明某个 agent 在失控重试，请检查其配置'
+    );
+    this.name = 'DailyCapError';
+    this.count = count;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 账号限制捕获（11140「异常活动受限」/ 11128 风控）：记下账号与时间，
+ * 由 /api/accounts 带给界面打「已被官方限制」徽章——小白最需要的就是
+ * 「这个号还能不能用」一句话答案，而不是去翻日志
+ * ------------------------------------------------------------------ */
+const accountRestrictions = new Map(); // accountId -> { code, at }
+export function noteAccountRestriction(accountId, text) {
+  if (!accountId) return;
+  const s = String(text || '');
+  let code = null;
+  if (/11140|unusual activity|has been restricted/i.test(s)) code = 11140;
+  else if (/11128|Illegal API invocation/i.test(s)) code = 11128;
+  if (!code) return;
+  const prev = accountRestrictions.get(accountId);
+  // 已知限制不覆盖更早的时间（首次受限时刻更有信息量）
+  if (prev?.code === code) return;
+  accountRestrictions.set(String(accountId), { code, at: Date.now() });
+  console.log(`[proxy] ⚠️ 账号 ${String(accountId).slice(0, 8)} 被官方限制（code=${code}），已在账号页标记`);
+}
+
+/** accountId → { code, at }（/api/accounts 用；只读视图） */
+export function restrictionMap() {
+  return Object.fromEntries(accountRestrictions);
+}
+
 /**
  * 在账号槽位内执行 fn（真正打上游的部分）。
  * 排队期间客户端断开也不会"跳号"——名额语义必须严格进出配对。
+ * 导出供 /api/proxy/doctor 体检复用（与业务流量共用同一套节流语义）。
  */
-async function withAccountSlot(account, fn) {
+export async function withAccountSlot(account, fn) {
   const key = String(account?.id || account?.uid || '');
   const prev = accountChains.get(key) || Promise.resolve();
   let run;
@@ -346,6 +396,12 @@ async function withAccountSlot(account, fn) {
   await acquireGlobalSlot();
   try {
     const cfg = loadConfig();
+    // 每日上限：先于真正出站判定，触顶直接拒绝（不烧积分也不加深风控暴露）
+    const cap = Number(cfg.proxy?.dailyPerAccountCap) || 500;
+    const done = bumpDailyCount(key);
+    if (done > cap) {
+      throw new DailyCapError(accountMeta(account).name, done);
+    }
     const minGap = Math.max(0, Number(cfg.proxy?.minIntervalMs) || 0);
     const last = lastUpstreamAt.get(key) || 0;
     const wait = last + minGap - Date.now();
@@ -698,6 +754,7 @@ async function handleChat(req, res) {
               continue;
             }
             if (out.status === 429 || isQuotaError(out.error)) markCooldown(account.id, String(body.model));
+            noteAccountRestriction(account.id, out.error);
             errors.push(`${accountMeta(account).name}: ${out.error || `HTTP ${out.status}`}`);
             break;
           }
@@ -709,6 +766,7 @@ async function handleChat(req, res) {
             res.locals.proxyLogged = true;
             if (isQuotaError(streamErr)) markCooldown(account.id, String(body.model));
             capture11128('chat', body, [streamErr]);
+            noteAccountRestriction(account.id, streamErr);
             log({ at: Date.now(), ok: false, status: pipeFailed ? 502 : 200, model: String(body.model), stream: true, account: accountMeta(account).name, ms: Date.now() - started, error: streamErr.slice(0, 300), ua: uaOf(req), auth: authLabel(req), path: pathOf(req) });
             return; // 响应已终止，绝不能再换下一个账号
           }
@@ -756,10 +814,12 @@ async function handleChat(req, res) {
         }
         // 限额类失败：给该「账号×模型」记冷却，后续请求直接跳过它
         if (out.status === 429 || isQuotaError(out.error)) markCooldown(account.id, String(body.model));
+        noteAccountRestriction(account.id, out.error);
         errors.push(`${accountMeta(account).name}: ${out.error || `HTTP ${out.status}`}`);
         break;
       } catch (err) {
         if (err?.status === 429) markCooldown(account.id, String(body.model));
+        noteAccountRestriction(account.id, err?.message);
         errors.push(`${accountMeta(account).name}: ${err?.message || '请求失败'}`);
         break;
       }
@@ -916,6 +976,7 @@ async function runAcrossPool(pool, task, model) {
           continue;
         }
         if (isQuotaError(r?.error)) markCooldown(account.id, model);
+        noteAccountRestriction(account.id, r?.error);
         errors.push(`${accountMeta(account).name}: ${r?.error || '请求失败'}`);
         break;
       } catch (err) {
@@ -926,6 +987,7 @@ async function runAcrossPool(pool, task, model) {
           }
         }
         if (err?.status === 429) markCooldown(account.id, model);
+        noteAccountRestriction(account.id, err?.message);
         errors.push(`${accountMeta(account).name}: ${err?.message || '请求失败'}`);
         break;
       }
@@ -993,6 +1055,7 @@ async function handleMessages(req, res) {
         markFailed(res, { started, model: upstream.model, stream: true, errors: [upErr] });
         if (isQuotaError(upErr)) markCooldown(account.id, upstream.model);
         capture11128('messages', upstream, [upErr]);
+        noteAccountRestriction(account.id, upErr);
       } else {
         markOk({ started, model: upstream.model, stream: true, account, req });
       }
@@ -1080,6 +1143,7 @@ async function handleResponses(req, res) {
         markFailed(res, { started, model: upstream.model, stream: true, errors: [upErr] });
         if (isQuotaError(upErr)) markCooldown(account.id, upstream.model);
         capture11128('responses', upstream, [upErr]);
+        noteAccountRestriction(account.id, upErr);
       } else {
         markOk({ started, model: upstream.model, stream: true, account, req });
       }
@@ -1189,6 +1253,7 @@ async function handleGemini(req, res) {
         markFailed(res, { started, model: upstream.model, stream: true, errors: [upErr] });
         if (isQuotaError(upErr)) markCooldown(account.id, upstream.model);
         capture11128('gemini', upstream, [upErr]);
+        noteAccountRestriction(account.id, upErr);
       } else {
         markOk({ started, model: upstream.model, stream: true, account, req });
       }
@@ -1332,6 +1397,11 @@ const PSEUDO_MODELS = new Set(['auto', 'default']);
 
 export function isPseudoModel(model) {
   return PSEUDO_MODELS.has(String(model || '').trim());
+}
+
+/** 模型清单只读视图（/api/proxy/doctor 体检用） */
+export function modelsState() {
+  return { ids: [...state.models.ids], fetchedAt: state.models.fetchedAt, error: state.models.error };
 }
 
 /**
