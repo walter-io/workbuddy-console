@@ -34,6 +34,7 @@ import {
 } from '../components/ui';
 import { del, get, patch, post, TIMEOUT } from '../lib/api';
 import { BRAND_MARKS } from '../lib/modelBrands';
+import { CROSS_ACCOUNT_OPS_REASON, CROSS_ACCOUNT_SESSION_OPS_DISABLED } from '../lib/riskGates';
 import { fmtDateTime } from '../lib/format';
 import type {
   AccountBalancesResponse,
@@ -612,12 +613,14 @@ function AccountCard({
         <Button
           size="sm"
           className="h-7 rounded-full px-2.5 pr-3.5 text-xs"
-          disabled={isCurrent || busy}
+          disabled={isCurrent || busy || CROSS_ACCOUNT_SESSION_OPS_DISABLED}
           onClick={onSyncSessions}
           title={
-            isCurrent
-              ? '这就是当前正在使用的账号，源与目标相同，无需转移会话'
-              : '把当前登录账号的会话转到这个账号：源账号不再保留，磁盘只存一份'
+            CROSS_ACCOUNT_SESSION_OPS_DISABLED
+              ? CROSS_ACCOUNT_OPS_REASON
+              : isCurrent
+                ? '这就是当前正在使用的账号，源与目标相同，无需转移会话'
+                : '把当前登录账号的会话转到这个账号：源账号不再保留，磁盘只存一份'
           }
         >
           <IconCopy className="w-3.5 h-3.5" />
@@ -1397,6 +1400,19 @@ function StopAppToggleRef({ flagRef }: { flagRef: { current: boolean } }) {
  */
 function CopyOnSwitchToggle({ flagRef }: { flagRef: { current: boolean } }) {
   const [on, setOn] = useState(false);
+  // 跨账号会话操作总闸：置灰「同时复制会话」，勾选状态强制为关
+  if (CROSS_ACCOUNT_SESSION_OPS_DISABLED) {
+    flagRef.current = false;
+    return (
+      <label className="mt-2 flex cursor-not-allowed items-start gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 opacity-70">
+        <input type="checkbox" className="mt-0.5 h-3.5 w-3.5 shrink-0" checked={false} disabled />
+        <span className="text-xs leading-relaxed text-zinc-500">
+          <b>同时复制会话（已停用）</b>：上游风控会识别跨账号会话重放并批量封禁关联账号
+          （2026-10-29 实测），该功能已临时关闭。
+        </span>
+      </label>
+    );
+  }
   return (
     <label className="mt-2 flex cursor-pointer items-start gap-2 rounded-xl border border-indigo-200 bg-indigo-50/60 px-3 py-2.5">
       <input
@@ -1939,6 +1955,10 @@ export default function AccountsPage() {
 
   /** 一键去重：同账号内重复会话合并成一份（先预演再确认执行） */
   const dedupeNow = async () => {
+    if (CROSS_ACCOUNT_SESSION_OPS_DISABLED) {
+      toast('info', CROSS_ACCOUNT_OPS_REASON);
+      return;
+    }
     setDedupeBusy(true);
     let plan: any = null;
     try {
@@ -1988,6 +2008,10 @@ export default function AccountsPage() {
 
   /** 一键同步：全部本机账号两两对齐（内容并集取最新 + 改名跟随），可选补全缺失会话 */
   const syncAllNow = async (fillMissing: boolean, pruneOthers = false) => {
+    if (CROSS_ACCOUNT_SESSION_OPS_DISABLED) {
+      toast('info', CROSS_ACCOUNT_OPS_REASON);
+      return;
+    }
     setSyncAllBusy(true);
     if (pruneOthers) setSummaryBusy(true);
     // 全量汇总：连国际版的会话也一起并进来
@@ -2671,9 +2695,13 @@ export default function AccountsPage() {
               variant="primary"
               size="sm"
               loading={summaryBusy}
-              disabled={syncAllBusy}
+              disabled={syncAllBusy || CROSS_ACCOUNT_SESSION_OPS_DISABLED}
               onClick={() => syncAllNow(false, true)}
-              title="把各账号（含国际版）独有的会话都并进当前账号，同一对话合并成一份；铺满后自动清理其他账号的冗余副本"
+              title={
+                CROSS_ACCOUNT_SESSION_OPS_DISABLED
+                  ? CROSS_ACCOUNT_OPS_REASON
+                  : '把各账号（含国际版）独有的会话都并进当前账号，同一对话合并成一份；铺满后自动清理其他账号的冗余副本'
+              }
             >
               全账号会话同步汇总
             </Button>
@@ -2681,9 +2709,13 @@ export default function AccountsPage() {
               variant="outline"
               size="sm"
               loading={dedupeBusy}
-              disabled={dedupeBusy}
+              disabled={dedupeBusy || CROSS_ACCOUNT_SESSION_OPS_DISABLED}
               onClick={dedupeNow}
-              title="同名的同一对话只保留内容最完整的一份，其余副本删除（先预演确认，执行前自动备份）"
+              title={
+                CROSS_ACCOUNT_SESSION_OPS_DISABLED
+                  ? CROSS_ACCOUNT_OPS_REASON
+                  : '同名的同一对话只保留内容最完整的一份，其余副本删除（先预演确认，执行前自动备份）'
+              }
             >
               一键去重
             </Button>

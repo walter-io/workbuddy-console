@@ -1025,6 +1025,28 @@ app.patch(
  * 列出「当前登录账号 → 目标账号」可复制的会话。
  * 只读：不写任何文件、不改数据库；供账号页的会话选择弹窗渲染。
  */
+/**
+ * 跨账号会话操作总闸（2026-10-29）。
+ *
+ * 用户实测：把会话复制/转移到其他账号后，同机的关联账号被上游风控批量封禁——
+ * 风控已能识别「跨账号会话重放 + 同机多账号关联」，封的是一组而不是一个。
+ * 受影响端点：copy / move / sync-all / dedupe（全部置灰，返回 403 + 原因）。
+ *
+ * 恢复方式：设环境变量 WB_ALLOW_CROSS_ACCOUNT=1，或把下面的 false 改回 true。
+ * 前端对应开关在 src/lib/riskGates.ts，恢复时两端一起改。
+ */
+const CROSS_ACCOUNT_SESSION_OPS = process.env.WB_ALLOW_CROSS_ACCOUNT === '1';
+
+function gateCrossAccount(res) {
+  if (CROSS_ACCOUNT_SESSION_OPS) return false;
+  res.status(403).json({
+    error:
+      '跨账号会话操作已临时停用：上游风控会识别跨账号会话重放并批量封禁关联账号（2026-10-29 用户实测）。' +
+      '如确需使用，请阅读相关风险说明后设环境变量 WB_ALLOW_CROSS_ACCOUNT=1 重启服务。',
+  });
+  return true;
+}
+
 app.get(
   '/api/sessions',
   wrap(async (req, res) => {
@@ -1045,6 +1067,7 @@ app.get(
 app.post(
   '/api/sessions/copy',
   wrap(async (req, res) => {
+    if (gateCrossAccount(res)) return;
     const accountId = String(req.body?.accountId || '');
     if (!accountId) return res.status(400).json({ error: '缺少 accountId' });
 
@@ -1132,6 +1155,7 @@ app.get(
 app.post(
   '/api/sessions/sync-all',
   wrap(async (req, res) => {
+    if (gateCrossAccount(res)) return;
     const dryRun = req.body?.dryRun === true;
     const fillMissing = req.body?.fillMissing === true;
     const pruneOthers = req.body?.pruneOthers === true;
@@ -1167,6 +1191,7 @@ app.post(
 app.post(
   '/api/sessions/move',
   wrap(async (req, res) => {
+    if (gateCrossAccount(res)) return;
     const targetAccountId = String(req.body?.targetAccountId || '').trim();
     if (!targetAccountId) throw Object.assign(new Error('缺少目标账号'), { status: 400 });
     const dryRun = req.body?.dryRun === true;
@@ -1200,6 +1225,7 @@ app.post(
 app.post(
   '/api/sessions/dedupe',
   wrap(async (req, res) => {
+    if (gateCrossAccount(res)) return;
     const dryRun = req.body?.dryRun === true;
     // 冻结方案已废除（冻结会把宿主进程一起冻住，用户系统卡死）。
     // 现在只做门禁：WorkBuddy 在运行就拒绝并提示用户手动退出（托盘右键退出）。
