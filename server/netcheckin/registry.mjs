@@ -211,9 +211,13 @@ export const BUILTIN_PLATFORMS = [
     homepage: 'https://www.liblib.art',
     loginUrl: 'https://www.liblib.art',
     entryUrls: ['https://www.liblib.art'],
+    // 每日领取入口不稳定：页头的算力按钮（Topbar_powerBtn）弹出的面板实测只有充值；
+    // 免费算力可能以登录弹窗/活动页形式发放。代领时会自动点开算力面板核对，
+    // 显示「没找到入口」时打开官网核对，若活动页有领取按钮，把按钮文字补进 config 的 keywords。
+    beforeClickSelectors: ['[class*="Topbar_powerBtn"]', '[class*="powerBtn"]'],
     keywords: ['签到', '领取', '每日领取'],
     doneKeywords: ['今日已领取', '已领取', '明日再来', '今日已签到'],
-    notes: '免费用户每日登录可领 300 点算力，在线生图与训练都用它；领取入口在个人中心或活动页，位置随活动调整，找不到时以官网公告为准。',
+    notes: '免费用户每日登录可领 300 点算力（领取形式随活动变化，可能以登录弹窗或活动页发放）。代领会自动点开页头算力按钮的面板核对；显示「没找到入口」时请打开官网看看活动页，把按钮文字补进 config 的 keywords 即可。',
   },
   {
     id: 'tusiart',
@@ -322,6 +326,9 @@ export function normalizePlatform(p) {
         : null,
     timeout: Number(p.timeout) || 180_000,
     notes: p.notes || '',
+    // 前置入口选择器：签到入口藏在顶栏按钮/菜单里的平台，先点开再找领取按钮
+    // （客户端类用 accountTrigger，网页类如哩布哩布的算力面板）——web/client 通用
+    beforeClickSelectors: Array.isArray(p.beforeClickSelectors) ? p.beforeClickSelectors : [],
     // 客户端类专属字段原样透传，引擎自己挑着用
     ...(p.kind === 'client' || p.app
       ? {
@@ -333,7 +340,6 @@ export function normalizePlatform(p) {
           openUrl: p.openUrl || '',
           pageUrlMatch: p.pageUrlMatch || '',
           clickSelectors: Array.isArray(p.clickSelectors) ? p.clickSelectors : [],
-          beforeClickSelectors: Array.isArray(p.beforeClickSelectors) ? p.beforeClickSelectors : [],
           menuOpenTexts: Array.isArray(p.menuOpenTexts) ? p.menuOpenTexts : [],
           autoRestart: Boolean(p.autoRestart),
           quitAppName: p.quitAppName || '',

@@ -262,6 +262,25 @@ export async function runGenericWeb(platform, page, logger) {
       return { status: 'needs_login', detail: login.reason, url: page.url() };
     }
 
+    // 签到入口藏在顶栏按钮/菜单里的平台（哩布哩布的算力面板等）：
+    // 先点开前置入口，再在展开的面板里找领取按钮
+    if (platform.beforeClickSelectors?.length) {
+      for (const sel of platform.beforeClickSelectors) {
+        try {
+          const loc = page.locator(sel).first();
+          if (await loc.isVisible({ timeout: 1500 })) {
+            logger?.step?.(`打开前置入口: ${sel}`);
+            await loc.click({ timeout: 4000 });
+            await sleep(1500 + Math.random() * 800);
+            break;
+          }
+        } catch {
+          /* 换下一个选择器 */
+        }
+      }
+      text = await pageVisibleText(page);
+    }
+
     // 登录即到账的平台（Vidu 等）：积分随访问自动发放，没有「签到按钮」可点——
     // 确认页面已进入登录后的状态就算领取完成；被人机验证拦住则如实报告
     if (platform.visitClaim) {
@@ -278,6 +297,12 @@ export async function runGenericWeb(platform, page, logger) {
       const okHit = (platform.loginOkTexts || []).find((k) => k && text.includes(k));
       if (okHit) {
         return { status: 'success', detail: `已到账（页面出现「${okHit}」，登录即送，无独立签到按钮）`, url: page.url() };
+      }
+      // 兜底正证：登录后的页面不会再有任何「登录/注册」入口文字（吐司实测——
+      // 登录态在 localStorage，cookie 判定不适用；已登录页全文找不到「登录」二字，
+      // 未登录的页面必然挂着登录入口）。走到这里说明登录墙检测已经通过。
+      if (!/(登录|注册)/.test(text)) {
+        return { status: 'success', detail: '已到账（页面上没有「登录/注册」入口，视为已登录；登录即送到账）', url: page.url() };
       }
       return { status: 'needs_login', detail: '未检测到登录态——点「重新登录」授权一次', url: page.url() };
     }
@@ -318,17 +343,35 @@ export async function runGenericWeb(platform, page, logger) {
   return { status: 'not_found', detail: lastReason.join('；') || '没有找到领取入口', url: page.url() };
 }
 
-/** 通用流程的检测模式：只查登录态 + 列出能看到哪些候选按钮，不点击 */
+/** 通用流程的检测模式：只查登录态 + 列出能看到哪些候选按钮，不点击（前置入口会点开，但不点领取） */
 export async function dryRunWeb(platform, page, logger) {
   const url = platform.entryUrls[0] || platform.homepage;
   await openAndWait(page, url, logger);
   await closeOverlays(page, logger);
-  const text = await pageVisibleText(page);
+  let text = await pageVisibleText(page);
   const login = await detectLoginWall(page, text);
+  if (login.needLogin) return { status: 'needs_login', detail: login.reason, url: page.url(), candidates: [] };
+
+  // 检测也要先点开前置入口（哩布哩布的算力面板等），否则永远看不到里面的领取按钮
+  if (platform.beforeClickSelectors?.length) {
+    for (const sel of platform.beforeClickSelectors) {
+      try {
+        const loc = page.locator(sel).first();
+        if (await loc.isVisible({ timeout: 1500 })) {
+          logger?.step?.(`打开前置入口: ${sel}`);
+          await loc.click({ timeout: 4000 });
+          await sleep(1500 + Math.random() * 800);
+          break;
+        }
+      } catch {
+        /* 换下一个选择器 */
+      }
+    }
+    text = await pageVisibleText(page);
+  }
+
   const cands = await findCandidateButtons(page, platform.keywords);
   const allButtons = await listVisibleButtons(page);
-
-  if (login.needLogin) return { status: 'needs_login', detail: login.reason, url: page.url(), candidates: [] };
   // 登录即到账的平台：检测语义与正式运行一致（被人机验证拦截/登录入口仍在/已登录）
   if (platform.visitClaim) {
     if (/验证您是真人|请按住滑块|拖动到最右|人机验证|安全验证/.test(text)) {
@@ -345,6 +388,10 @@ export async function dryRunWeb(platform, page, logger) {
     const okHit = (platform.loginOkTexts || []).find((k) => k && text.includes(k));
     if (okHit) {
       return { status: 'dry_run', detail: `检测通过：页面出现「${okHit}」，已登录且已到账`, url: page.url(), candidates: [], buttons: allButtons };
+    }
+    // 兜底正证：全文没有「登录/注册」字样 = 登录入口已消失 = 已登录（同正式运行的判定）
+    if (!/(登录|注册)/.test(text)) {
+      return { status: 'dry_run', detail: '检测通过：页面上没有「登录/注册」入口，视为已登录', url: page.url(), candidates: [], buttons: allButtons };
     }
     return { status: 'needs_login', detail: '未检测到登录态——点「登录」在工具里登录一次后再检测', url: page.url(), candidates: [], buttons: allButtons };
   }

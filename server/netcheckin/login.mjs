@@ -84,14 +84,15 @@ const DETECTORS = {
     return { ok: !loginForm && logged, why: loginForm ? 'login-form' : logged ? 'user-ui' : 'unknown' };
   },
   // 哩布哩布：登录后页头会出现「算力」余额字样（未登录时不显示），退出入口
-  // 藏在头像悬停菜单里 innerText 抓不到——文字兜底之外再认一组登录 cookie。
+  // 藏在头像悬停菜单里 innerText 抓不到——再认登录 cookie（实测为 usertoken /
+  // usertoken_online，2026-11-05 从共享档案 Cookies 库确认）。
   liblib: async (page, ctx) => {
     const text = await pageVisibleText(page, 6000).catch(() => '');
     if (/退出登录|退出帐号|注销登录/.test(text)) return { ok: true, why: '发现退出登录入口' };
     if (/算力/.test(text)) return { ok: true, why: '页头出现算力余额（登录态正证）' };
     const cookies = await ctx.cookies('https://www.liblib.art').catch(() => []);
-    if (cookies.some((c) => c.value && c.value.length > 10 && /liblib|authorization|_token|session/i.test(c.name))) {
-      return { ok: true, why: '哩布哩布登录 cookie 已出现' };
+    if (cookies.some((c) => c.value && /usertoken/i.test(c.name))) {
+      return { ok: true, why: '哩布哩布登录 cookie（usertoken）已出现' };
     }
     return { ok: false, why: /扫码登录|请输入手机号|获取验证码/.test(text) ? '登录表单仍在' : '未检测到登录态（页头没有算力字样）' };
   },

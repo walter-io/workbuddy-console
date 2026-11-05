@@ -245,6 +245,24 @@ function RecordsSection({ state, onRefresh, onOpen }: { state: NetState; onRefre
     return true;
   });
 
+  /** 导出当前筛选下的记录为 CSV（带 BOM，Excel 直接打开不乱码） */
+  const exportCsv = () => {
+    const head = ['平台', '状态', '积分变动', '余额', '说明', '时间'];
+    const esc = (v: string) => `"${(v || '').replace(/"/g, '""')}"`;
+    const lines = rows.map((r) =>
+      [r.name, STATUS_LABEL[r.status] || r.status, r.gain != null ? `+${r.gain}` : '', r.credits != null ? String(r.credits) : '', r.detail, fmtDateTime(r.ts)]
+        .map(esc)
+        .join(','),
+    );
+    const csv = '\uFEFF' + head.map(esc).join(',') + '\n' + lines.join('\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `领取记录-${new Date().toISOString().slice(0, 10)}${filterId !== 'all' ? `-${filterId}` : ''}${onlyIssues ? '-异常' : ''}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <PageSection
       icon={<IconRefresh />}
@@ -279,6 +297,9 @@ function RecordsSection({ state, onRefresh, onOpen }: { state: NetState; onRefre
             title="只显示未成功 / 受阻的记录"
           >
             只看异常
+          </Button>
+          <Button size="sm" variant="ghost" onClick={exportCsv} disabled={!rows.length} title="把当前筛选下的记录导出为 CSV（Excel 可直接打开）">
+            导出
           </Button>
           <Button size="sm" variant="subtle" onClick={onRefresh} title="重新拉取最新记录">
             <IconRefresh className="w-3.5 h-3.5" />
@@ -512,27 +533,46 @@ export default function NetCheckinPage() {
   }, [refresh, pullLogs]);
 
   // 轮询节奏：有平台在执行（批量或单平台）2 秒（输出要跟手），空闲 30 秒兜底刷新；
-  // 检测到「运行中 → 结束」的瞬间补一条汇总提示 + 下载类平台的主动提醒
+  // 检测到「运行中 → 结束」的瞬间补汇总提示（正式跑按 lastRun、检测按 trial 统计），
+  // 并主动提醒需要人工处理的情况（需下载客户端 / 登录失效），别让用户翻记录才发现
   const prevRunning = useRef(false);
+  const prevLastRunTs = useRef(0);
+  const loginWarned = useRef<Set<string>>(new Set());
   useEffect(() => {
     const anyActive = state?.running || (state?.activeIds?.length || 0) > 0;
     const t = setInterval(async () => {
       const s = await get<NetState>('/api/netcheckin/state').catch(() => null);
       if (s) {
         setState(s);
-        if (prevRunning.current && !s.running && s.lastRun) {
-          const ok = s.lastRun.done === s.lastRun.total && s.lastRun.total > 0;
-          if (ok) toast('ok', `本轮全部领取完成（${s.lastRun.done}/${s.lastRun.total}）`);
-          else toast('info', `本轮结束：${s.lastRun.done}/${s.lastRun.total} 领取成功，详情见领取记录`);
-          // 需要下载客户端才能领的平台：入口未命中时大声提醒，别让用户翻记录才发现
+        if (prevRunning.current && !s.running) {
+          if (s.lastRun && s.lastRun.ts !== prevLastRunTs.current) {
+            // 正式运行：按轮次汇总
+            const ok = s.lastRun.done === s.lastRun.total && s.lastRun.total > 0;
+            if (ok) toast('ok', `本轮全部领取完成（${s.lastRun.done}/${s.lastRun.total}）`);
+            else toast('info', `本轮结束：${s.lastRun.done}/${s.lastRun.total} 领取成功，详情见领取记录`);
+          } else if (s.trial) {
+            // 检测：按行内回填结论汇总
+            const entries = Object.values(s.trial);
+            const pass = entries.filter((e) => e.status === 'dry_run').length;
+            if (entries.length) toast('info', `检测完成：${pass} 个通过，${entries.length - pass} 个需处理（结论已标在行/页签上）`);
+          }
+          // 需要下载客户端才能领的平台：入口未命中时大声提醒
           for (const p of s.platforms) {
             if (p.claimViaApp && p.lastStatus === 'not_found' && !appWarned.current.has(p.id)) {
               appWarned.current.add(p.id);
               toast('warn', `${p.name}：${p.appOnlyNote || '该平台需要下载客户端或在 App 内领取'}`);
             }
           }
+          // 登录失效的平台：主动提醒去重新授权（每次会话每平台只提醒一次）
+          for (const p of s.platforms) {
+            if (p.enabled && p.lastStatus === 'needs_login' && !loginWarned.current.has(p.id)) {
+              loginWarned.current.add(p.id);
+              toast('warn', `${p.name} 登录已失效——到该平台的页签点「重新登录」授权一次`);
+            }
+          }
         }
         prevRunning.current = s.running;
+        prevLastRunTs.current = s.lastRun?.ts || 0;
       }
       await pullLogs();
     }, anyActive ? 2_000 : 30_000);
