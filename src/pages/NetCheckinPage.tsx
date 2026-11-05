@@ -22,11 +22,13 @@ import {
   Card,
   EmptyState,
   Hint,
+  IconCalendar,
   IconChevronDown,
   IconChevronUp,
   IconExternalLink,
   IconInfo,
   IconRefresh,
+  IconWarning,
   IconZap,
   Note,
   PageSection,
@@ -47,6 +49,7 @@ import {
   CATEGORY_ORDER,
   STATUS_LABEL,
   avatarCls,
+  matrixDotCls,
   statusDotCls,
   statusTextCls,
 } from '../lib/netcheckin';
@@ -59,7 +62,17 @@ function parseSubId(): string | null {
 }
 
 const VIEW_KEY = 'wbhub.netcheckin.view';
+const TAB_KEY = 'wbhub.netcheckin.tab';
 type ViewMode = 'tab' | 'list';
+
+/** 记住上次浏览的平台页签（深链优先于记忆） */
+function loadSavedTab(): string {
+  try {
+    return localStorage.getItem(TAB_KEY) || 'overview';
+  } catch {
+    return 'overview';
+  }
+}
 
 /* ---------------- 平台行（列表视图） ---------------- */
 
@@ -221,8 +234,17 @@ function PlatformRow({
 
 /* ---------------- 共享区块 ---------------- */
 
-/** 领取记录表（平台 / 状态 / 积分 / 说明 / 时间），总览页签与列表视图共用 */
+/** 领取记录表（平台 / 状态 / 积分 / 说明 / 时间），总览页签与列表视图共用；支持平台筛选与只看异常 */
 function RecordsSection({ state, onRefresh, onOpen }: { state: NetState; onRefresh: () => void; onOpen: (id: string) => void }) {
+  const [filterId, setFilterId] = useState<string>('all');
+  const [onlyIssues, setOnlyIssues] = useState(false);
+
+  const rows = (state.recentResults || []).filter((r) => {
+    if (filterId !== 'all' && r.id !== filterId) return false;
+    if (onlyIssues && ['success', 'already', 'dry_run'].includes(r.status)) return false;
+    return true;
+  });
+
   return (
     <PageSection
       icon={<IconRefresh />}
@@ -236,10 +258,33 @@ function RecordsSection({ state, onRefresh, onOpen }: { state: NetState; onRefre
       }
       count={state.recentResults?.length ? String(state.recentResults.length) : undefined}
       actions={
-        <Button size="sm" variant="subtle" onClick={onRefresh} title="重新拉取最新记录">
-          <IconRefresh className="w-3.5 h-3.5" />
-          刷新
-        </Button>
+        <>
+          <select
+            value={filterId}
+            onChange={(e) => setFilterId(e.target.value)}
+            className="h-8 rounded-xl border border-zinc-200 bg-white px-2 text-xs text-zinc-600 outline-none focus:border-indigo-400"
+            title="按平台筛选"
+          >
+            <option value="all">全部平台</option>
+            {state.platforms.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <Button
+            size="sm"
+            variant={onlyIssues ? 'outline' : 'ghost'}
+            onClick={() => setOnlyIssues((v) => !v)}
+            title="只显示未成功 / 受阻的记录"
+          >
+            只看异常
+          </Button>
+          <Button size="sm" variant="subtle" onClick={onRefresh} title="重新拉取最新记录">
+            <IconRefresh className="w-3.5 h-3.5" />
+            刷新
+          </Button>
+        </>
       }
     >
       <Card className="p-0 overflow-hidden">
@@ -255,7 +300,7 @@ function RecordsSection({ state, onRefresh, onOpen }: { state: NetState; onRefre
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-50">
-              {(state.recentResults || []).map((r, i) => (
+              {rows.map((r, i) => (
                 <tr
                   key={`${r.id}-${r.ts}-${i}`}
                   className="hover:bg-zinc-50/60 transition-colors cursor-pointer"
@@ -292,10 +337,10 @@ function RecordsSection({ state, onRefresh, onOpen }: { state: NetState; onRefre
                   <td className="py-2.5 px-4 text-right text-xs text-zinc-400 tabular-nums">{fmtDateTime(r.ts)}</td>
                 </tr>
               ))}
-              {!state.recentResults?.length && (
+              {rows.length === 0 && (
                 <tr>
                   <td colSpan={5} className="py-8 text-center text-sm text-zinc-400">
-                    还没有记录。点「一键领取」，或某一行里的「领取」，每次执行都会记在这里。
+                    {state.recentResults?.length ? '当前筛选下没有记录' : '还没有记录。点「一键领取」，或某一行里的「领取」，每次执行都会记在这里。'}
                   </td>
                 </tr>
               )}
@@ -386,9 +431,9 @@ function ManualSection({ platforms }: { platforms: NetState['manualPlatforms'] }
 export default function NetCheckinPage() {
   const toast = useToast();
   const [view, setView] = useState<ViewMode>(() => (localStorage.getItem(VIEW_KEY) === 'list' ? 'list' : 'tab'));
-  const [activeTab, setActiveTab] = useState<string>(() => parseSubId() || 'overview');
+  const [activeTab, setActiveTab] = useState<string>(() => parseSubId() || loadSavedTab());
   /** 访问过的平台页签保持挂载（仅隐藏），切换不重新拉数据 */
-  const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set([parseSubId() || 'overview'].filter(Boolean) as string[]));
+  const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set([parseSubId() || loadSavedTab()].filter(Boolean) as string[]));
   const [state, setState] = useState<NetState | null>(null);
   const [logs, setLogs] = useState<LogRow[]>([]);
   const [busy, setBusy] = useState(false);
@@ -400,6 +445,17 @@ export default function NetCheckinPage() {
   const logSeq = useRef(0);
   /** 已主动提醒过「需要下载客户端」的平台（每次会话只提醒一次） */
   const appWarned = useRef<Set<string>>(new Set());
+
+  /** 切页签并记住选择（刷新后回到上次看的地方） */
+  const switchTab = useCallback((id: string) => {
+    setActiveTab(id);
+    if (id !== 'overview') setVisitedTabs((v) => (v.has(id) ? v : new Set(v).add(id)));
+    try {
+      localStorage.setItem(TAB_KEY, id);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -433,15 +489,14 @@ export default function NetCheckinPage() {
       const sub = parseSubId();
       if (sub) {
         setView('tab');
-        setActiveTab(sub);
-        setVisitedTabs((v) => (v.has(sub) ? v : new Set(v).add(sub)));
+        switchTab(sub);
       } else {
-        setActiveTab('overview');
+        switchTab('overview');
       }
     };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
-  }, []);
+  }, [switchTab]);
 
   // 浏览器会把后台标签页的定时器节流到分钟级——切回本页时立刻补拉一次状态，
   // 否则补跑领完了豆包，切回来还要等下一个轮询甚至手动刷新才能看到「今日已领」
@@ -547,12 +602,19 @@ export default function NetCheckinPage() {
   };
 
   /** 切到某平台的页签（页签视图）：写 hash 保持深链可复制 */
-  const openPlatform = useCallback((id: string) => {
-    setView('tab');
-    setActiveTab(id);
-    setVisitedTabs((v) => (v.has(id) ? v : new Set(v).add(id)));
-    if (parseSubId() !== id) location.hash = `netcheckin/${id}`;
-  }, []);
+  const openPlatform = useCallback(
+    (id: string) => {
+      setView('tab');
+      try {
+        localStorage.setItem(VIEW_KEY, 'tab');
+      } catch {
+        /* ignore */
+      }
+      switchTab(id);
+      if (parseSubId() !== id) location.hash = `netcheckin/${id}`;
+    },
+    [switchTab],
+  );
 
   const switchView = (v: ViewMode) => {
     setView(v);
@@ -579,6 +641,19 @@ export default function NetCheckinPage() {
   const sorted = [...state.platforms].sort(
     (a, b) => (CATEGORY_ORDER[a.category] ?? 9) - (CATEGORY_ORDER[b.category] ?? 9),
   );
+
+  // 需要关注的问题清单：登录失效 / 需要下载客户端领取 / 客户端未装
+  const issues = state.platforms
+    .map((p) => {
+      if (p.enabled && p.lastStatus === 'needs_login')
+        return { p, why: p.kind === 'web' ? '登录已失效，需要重新授权一次' : '客户端登录已失效' };
+      if (p.claimViaApp && p.lastStatus === 'not_found')
+        return { p, why: p.appOnlyNote || '该平台需要下载客户端或在 App 内领取' };
+      if (p.kind === 'client' && p.enabled && p.lastStatus === 'not_installed')
+        return { p, why: '本机未安装该客户端，装好并登录后才能代领' };
+      return null;
+    })
+    .filter((x): x is { p: NetPlatform; why: string } => x !== null);
 
   return (
     <div className="space-y-6">
@@ -623,7 +698,7 @@ export default function NetCheckinPage() {
           <div className="w-full flex flex-wrap items-center gap-1.5 pt-0.5 border-t border-zinc-100 mt-1">
             <button
               onClick={() => {
-                setActiveTab('overview');
+                switchTab('overview');
                 if (parseSubId()) location.hash = 'netcheckin';
               }}
               className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs transition-all duration-150 ${
@@ -644,7 +719,9 @@ export default function NetCheckinPage() {
               >
                 <span className={`w-4 h-4 rounded flex items-center justify-center text-[10px] font-semibold ${avatarCls(p.id)}`}>{p.name.slice(0, 1)}</span>
                 <span className="max-w-28 truncate">{p.name}</span>
-                <span className={`inline-block h-1.5 w-1.5 rounded-full ${p.lastStatus ? statusDotCls(p.lastStatus) : 'bg-zinc-200'}`} />
+                <span
+                  className={`inline-block h-1.5 w-1.5 rounded-full ${state.activeIds?.includes(p.id) ? 'bg-blue-500 animate-pulse' : p.lastStatus ? statusDotCls(p.lastStatus) : 'bg-zinc-200'}`}
+                />
               </button>
             ))}
           </div>
@@ -687,14 +764,66 @@ export default function NetCheckinPage() {
                 tone="amber"
                 icon={<IconRefresh />}
               />
-              <StatCard
-                label="自动领取"
-                value={state.schedule.enabled ? state.schedule.time : '已关闭'}
-                sub={`随机延迟 0~${state.schedule.jitterMinutes} 分钟，时间在「设置」页调`}
-                tone="sky"
-                icon={<IconZap />}
-              />
-            </div>
+                <StatCard
+                  label="自动领取"
+                  value={state.schedule.enabled ? state.schedule.time : '已关闭'}
+                  sub={`随机延迟 0~${state.schedule.jitterMinutes} 分钟，时间在「设置」页调`}
+                  tone="sky"
+                  icon={<IconZap />}
+                />
+              </div>
+
+              {/* 需要关注的问题清单：登录失效 / 需下载客户端 / 客户端未装，一键跳到对应页签 */}
+              {issues.length > 0 && (
+                <Card className="p-0 overflow-hidden border-amber-200/70">
+                  <div className="px-4 py-2.5 border-b border-amber-100 bg-amber-50/60 text-xs font-medium text-amber-800 flex items-center gap-2">
+                    <IconWarning className="w-3.5 h-3.5 text-amber-500" />
+                    需要关注（{issues.length}）——点平台名去处理
+                  </div>
+                  <div className="divide-y divide-zinc-50">
+                    {issues.map(({ p, why }) => (
+                      <button
+                        key={p.id}
+                        onClick={() => openPlatform(p.id)}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-zinc-50/70 transition-colors"
+                      >
+                        <span className={`w-6 h-6 rounded-lg flex items-center justify-center text-[11px] font-semibold shrink-0 ${avatarCls(p.id)}`}>
+                          {p.name.slice(0, 1)}
+                        </span>
+                        <span className="text-[13px] font-medium text-zinc-700 shrink-0">{p.name}</span>
+                        <span className="text-xs text-amber-700 min-w-0 truncate">{why}</span>
+                        <span className="ml-auto text-xs text-indigo-500 shrink-0">去处理 →</span>
+                      </button>
+                    ))}
+                  </div>
+                </Card>
+              )}
+
+              {/* 全平台 14 天领取热力图：一行一个平台，点行跳页签 */}
+              <PageSection icon={<IconCalendar />} title="近 14 天总览" desc="青绿=已领 · 琥珀=受阻 · 玫红=失败 · 灰=未执行，点平台名看详情">
+                <Card className="p-4 space-y-1.5">
+                  {sorted.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => openPlatform(p.id)}
+                      className="w-full flex items-center gap-3 rounded-lg px-2 py-1 hover:bg-zinc-50 transition-colors text-left"
+                      title={`查看 ${p.name} 详情`}
+                    >
+                      <span className="w-24 shrink-0 truncate text-xs text-zinc-600">{p.name}</span>
+                      <span className="flex items-center gap-1">
+                        {Object.keys(p.matrix || {}).map((d) => (
+                          <span
+                            key={d}
+                            className={`inline-block h-3.5 w-3.5 rounded ${matrixDotCls(p.matrix[d])}`}
+                            title={`${p.name} · ${d}：${STATUS_LABEL[p.matrix[d] || ''] || '未执行'}`}
+                          />
+                        ))}
+                      </span>
+                      {p.streak >= 2 && <Badge color="teal">连续 {p.streak} 天</Badge>}
+                    </button>
+                  ))}
+                </Card>
+              </PageSection>
             <RecordsSection state={state} onRefresh={refresh} onOpen={openPlatform} />
             <PageSection
               icon={<IconInfo />}
@@ -731,8 +860,9 @@ export default function NetCheckinPage() {
                   state={state}
                   trial={state.trial?.[p.id]}
                   login={login}
-                  onBack={() => setActiveTab('overview')}
+                  onBack={() => switchTab('overview')}
                   showBack={false}
+                  visible={activeTab === p.id}
                   onRefresh={refresh}
                   onRun={(id, opts) => startRun({ only: [id], ...(opts || {}) }, true)}
                   onToggle={togglePlatform}

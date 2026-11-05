@@ -56,6 +56,7 @@ export default function NetPlatformDetail({
   onToggle,
   onLogin,
   onCancelLogin,
+  visible = true,
 }: {
   id: string;
   state: NetState | null;
@@ -64,6 +65,8 @@ export default function NetPlatformDetail({
   onBack: () => void;
   /** 页签视图下顶栏已有页签条，返回按钮冗余；列表/深链场景显示 */
   showBack?: boolean;
+  /** 页签视图下非当前页签虽然挂载但不可见：暂停轮询，省掉十几个页签的空转请求 */
+  visible?: boolean;
   onRefresh: () => void;
   onRun: (id: string, opts?: { dryRun?: boolean }) => void;
   onToggle: (id: string, enabled: boolean) => void;
@@ -88,12 +91,14 @@ export default function NetPlatformDetail({
     load();
   }, [load]);
 
-  // 该平台执行中或登录窗口开着时 3 秒轮询记录，否则 30 秒兜底
+  // 该平台执行中或登录窗口开着时 3 秒轮询记录，否则 30 秒兜底；
+  // 页签不可见（保持挂载但被隐藏）时不轮询——切回时 useEffect 依赖变化自动恢复
   const active = state?.activeIds?.includes(id) || login?.stage === 'waiting';
   useEffect(() => {
+    if (!visible) return;
     const t = setInterval(load, active ? 3_000 : 30_000);
     return () => clearInterval(t);
-  }, [load, active]);
+  }, [load, active, visible]);
 
   const p = detail?.platform || state?.platforms.find((x) => x.id === id) || null;
 
