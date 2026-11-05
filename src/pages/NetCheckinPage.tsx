@@ -211,7 +211,13 @@ function PlatformRow({
               重新登录
             </Button>
           )}
-          <Button size="xs" variant="ghost" disabled={active} onClick={() => onTrial(p.id)} title="只核对这一个平台的入口与登录态，不点击、不领取">
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={active || p.kind === 'client'}
+            onClick={() => onTrial(p.id)}
+            title={p.kind === 'client' ? '桌面版平台的检测需要重启客户端接管，不做只读检测——直接用「领取」即可' : '只核对这一个平台的入口与登录态，不点击、不领取'}
+          >
             检测
           </Button>
           <Button size="xs" variant="subtle" disabled={active || !p.enabled || p.todayDone} onClick={() => onRun(p.id)}>

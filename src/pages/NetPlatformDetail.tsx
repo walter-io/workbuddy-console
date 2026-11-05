@@ -203,7 +203,14 @@ export default function NetPlatformDetail({
               {loginActive ? '取消登录' : needLogin ? '重新登录' : '登录'}
             </Button>
           )}
-          <Button size="sm" variant="subtle" disabled={rowActive || trialBusy} loading={trialBusy} onClick={() => run({ dryRun: true })}>
+          <Button
+            size="sm"
+            variant="subtle"
+            disabled={rowActive || trialBusy || p.kind === 'client'}
+            loading={trialBusy}
+            onClick={() => run({ dryRun: true })}
+            title={p.kind === 'client' ? '桌面版平台的检测需要重启客户端接管，不做只读检测——直接用「领取」即可' : '只核对入口与登录态，不点击、不领取'}
+          >
             检测
           </Button>
           <Button size="sm" variant="primary" disabled={rowActive || runBusy || !p.enabled || p.todayDone} loading={runBusy} onClick={() => run()}>

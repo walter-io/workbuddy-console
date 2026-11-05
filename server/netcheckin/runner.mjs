@@ -19,7 +19,7 @@ import { resolvePlatforms, loadConfig, appendResult, readResults, todayStr, shot
 import { runZhipu, runGenericWeb, dryRunWeb, runMinimax, runClientCheckin, clientInstalled, zhipuProbeRun, comateProbeRun } from './engines.mjs';
 import { snapshot, dumpHtml } from './dom.mjs';
 import { isClientRunning, MANUAL_PLATFORMS } from './registry.mjs';
-import { loginOkSince } from './login.mjs';
+import { loginOkSince, markLoginOk } from './login.mjs';
 
 /** 单平台超时上限：客户端冷启动可能很慢（尤其早上刚唤醒的机器） */
 const PLATFORM_TIMEOUT_MS = 240_000;
@@ -391,6 +391,12 @@ export async function runNetCheckin({ only = [], dryRun = false, source = 'manua
           results.push(rec);
           logResult(rec, p);
           if (!dryRun) appendResult(rec);
+          // 检测证明登录态有效：同步刷新登录记账。否则被「登录失效」暂停的平台
+          // 即使检测通过也会一直被自动领取跳过（检测结果不入账，needs_login 记录盖不掉）
+          if (rec.status === 'dry_run' && p.kind === 'web' && loginOkSince(p.id) <= rec.ts - 60_000) {
+            markLoginOk(p.id);
+            pushLog('info', `· ${p.name}：检测证明登录态有效，已刷新登录记账`);
+          }
           // 逐平台回填结论并推进运行代数——前端 2 秒一轮的状态轮询会在几秒内把
           // 结论标到行上，不用等整轮结束
           lastTrial.at = Date.now();
