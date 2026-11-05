@@ -1,8 +1,8 @@
 {
   "name": "workbuddy-console",
   "private": true,
-  "version": "0.2.19",
-  "description": "workbuddy控制台：账号切换、多平台免费模型广场、Token 与积分用量统计",
+  "version": "0.2.20",
+  "description": "workbuddy控制台：账号切换、多平台免费模型广场、Token 与积分用量统计、全网签到",
   "author": "walter-io",
   "license": "MIT",
   "repository": {
@@ -35,11 +35,13 @@
     "app": "electron .",
     "app:dir": "npm run build && electron-builder --dir --publish never",
     "app:win": "npm run build && electron-builder --win --publish never",
-    "app:mac": "npm run build && electron-builder --mac --publish never"
+    "app:mac": "npm run build && electron-builder --mac --publish never",
+    "test:netcheckin": "node scripts/test-netcheckin.mjs"
   },
   "dependencies": {
     "express": "^4.21.0",
     "iconv-lite": "^0.4.24",
+    "playwright": "^1.64.1",
     "undici": "^6.29.0"
   },
   "devDependencies": {

@@ -118,6 +118,7 @@ export function Button({ variant = 'subtle', size = 'md', loading, className = '
 
 const badgeColors: Record<string, string> = {
   green: 'bg-emerald-50 text-emerald-700 border-emerald-200/80',
+  teal: 'bg-teal-50 text-teal-700 border-teal-200/80',
   blue: 'bg-sky-50 text-sky-700 border-sky-200/80',
   gray: 'bg-zinc-100 text-zinc-500 border-zinc-200/80',
   amber: 'bg-amber-50 text-amber-700 border-amber-200/80',
@@ -127,6 +128,7 @@ const badgeColors: Record<string, string> = {
 
 const dotColors: Record<string, string> = {
   green: 'bg-emerald-500',
+  teal: 'bg-teal-500',
   blue: 'bg-sky-500',
   gray: 'bg-zinc-400',
   amber: 'bg-amber-500',
@@ -357,6 +359,58 @@ export function Skeleton({ className = '' }: { className?: string }) {
   return <div className={`animate-pulse bg-zinc-100 rounded ${className}`} />;
 }
 
+/* ---------------- Switch（胶囊滑动开关） ---------------- */
+
+/**
+ * 左右滑动的胶囊开关：圆形旋钮在胶囊轨道上滑，开启时轨道变靛蓝、旋钮滑到右侧。
+ * 状态文字（可选）显示在开关旁边而不是胶囊里——胶囊太小放不下字；
+ * 不传 onText/offText 时只渲染开关本身。
+ */
+export function Switch({
+  checked,
+  onChange,
+  disabled,
+  onText = '开启',
+  offText = '关闭',
+  title,
+  className = '',
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled?: boolean;
+  onText?: React.ReactNode;
+  offText?: React.ReactNode;
+  title?: string;
+  className?: string;
+}) {
+  const label = checked ? onText : offText;
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      title={title}
+      onClick={() => onChange(!checked)}
+      className={`inline-flex shrink-0 items-center gap-2 ${disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer select-none'} ${className}`}
+    >
+      {label ? <span className="text-xs text-zinc-500">{label}</span> : null}
+      <span
+        className={`relative inline-block h-5 w-9 shrink-0 rounded-full transition-colors duration-200 ${
+          checked ? 'bg-indigo-600' : 'bg-zinc-300'
+        }`}
+      >
+        <span
+          className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 ${
+            checked ? 'translate-x-4' : 'translate-x-0'
+          }`}
+        />
+      </span>
+    </button>
+  );
+}
+
+
 /* ---------------- Modal ---------------- */
 
 export function Modal({ open, onClose, title, subtitle, children, footer, width = 'max-w-lg' }: {
@@ -572,7 +626,7 @@ export function EmptyState({ icon, title, desc, action }: { icon?: React.ReactNo
 
 /* ---------------- Toast ---------------- */
 
-type ToastItem = { id: number; type: 'ok' | 'err' | 'info'; text: string };
+type ToastItem = { id: number; type: 'ok' | 'err' | 'info' | 'warn'; text: string };
 const ToastCtx = createContext<(type: ToastItem['type'], text: string) => void>(() => {});
 export const useToast = () => useContext(ToastCtx);
 
@@ -594,11 +648,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           <div
             key={t.id}
             className={`pointer-events-auto max-w-2xl flex items-start gap-2.5 rounded-xl px-4 py-2.5 shadow-lg shadow-zinc-900/10 text-sm animate-slide-up ${
-              t.type === 'ok' ? 'bg-emerald-600 text-white' : t.type === 'err' ? 'bg-red-600 text-white' : 'bg-zinc-800 text-white'
+              t.type === 'ok' ? 'bg-emerald-600 text-white' : t.type === 'err' ? 'bg-red-600 text-white' : t.type === 'warn' ? 'bg-amber-500 text-white' : 'bg-zinc-800 text-white'
             }`}
           >
             <span className="shrink-0 mt-0.5 [&>svg]:w-4 [&>svg]:h-4">
-              {t.type === 'ok' ? <IconCheck /> : t.type === 'err' ? <IconWarning /> : <IconInfo />}
+              {t.type === 'ok' ? <IconCheck /> : t.type === 'err' || t.type === 'warn' ? <IconWarning /> : <IconInfo />}
             </span>
             <span className="leading-relaxed break-words">{t.text}</span>
           </div>

@@ -265,8 +265,8 @@ export default function CreditStatsPage() {
           title={variant === 'all' ? '暂无积分数据' : `${variantLabel}暂无积分数据`}
           desc={
             variant === 'all'
-              ? '账号库为空，或官方接口未返回数据。请先到「账号管理」导入账号并确认凭据有效'
-              : `账号库里还没有${variantLabel}账号。可切回「全部档位」查看其它档位，或到「账号管理」用${variantLabel}扫码添加。`
+              ? '账号库为空，或官方接口未返回数据。请先到「WorkBuddy 管理 → 账号切换」导入账号并确认凭据有效'
+              : `账号库里还没有${variantLabel}账号。可切回「全部档位」查看其它档位，或到「WorkBuddy 管理 → 账号切换」用${variantLabel}扫码添加。`
           }
           action={
             <div className="flex flex-wrap items-center justify-center gap-2">

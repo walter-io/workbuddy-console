@@ -1832,6 +1832,140 @@ startCheckinPatrol();
 // 反向代理已开启时，启动时预热一次模型缓存（失败不阻塞启动，页面可手动刷新）
 if (loadConfig().proxy?.enabled) refreshModelsCache().catch(() => {});
 
+/* ---------------- 全网签到（其他 AI 平台的每日福利代领） ---------------- */
+
+import {
+  buildNetCheckinState,
+  runNetCheckin,
+  netCheckinBusy,
+  runEpoch,
+  tailLogs,
+  fillClientRunning,
+  platformDetail,
+} from './netcheckin/runner.mjs';
+import { loadConfig as loadNetCheckinConfig, saveConfigAsync as saveNetCheckinConfig, resolvePlatforms as resolveNetPlatforms } from './netcheckin/store.mjs';
+import { startLogin, cancelLogin, loginState } from './netcheckin/login.mjs';
+import { startNetCheckinScheduler, nextWindowAt } from './netcheckin/scheduler.mjs';
+
+/** 状态接口：平台清单 + 最近结果 + 14 天矩阵 + 定时设置。
+ *  缓存失效看两处：60 秒自然过期，或 runEpoch 变了（一轮跑完状态必然变了）。
+ *  客户端进程扫描有开销（每个客户端一次 tasklist），所以不能每次都现扫。 */
+let netStateCache = { at: 0, epoch: -1, data: null };
+async function netCheckinState() {
+  if (!netStateCache.data || netStateCache.epoch !== runEpoch.value || Date.now() - netStateCache.at > 60_000) {
+    const state = buildNetCheckinState();
+    await fillClientRunning(state.platforms).catch(() => {});
+    state.nextWindowAt = nextWindowAt();
+    netStateCache = { at: Date.now(), epoch: runEpoch.value, data: state };
+  }
+  return netStateCache.data;
+}
+
+app.get(
+  '/api/netcheckin/state',
+  wrap(async (req, res) => {
+    const state = await netCheckinState();
+    res.json(state);
+  })
+);
+
+/** 手动跑一轮：立即返回，进度靠轮询 /logs 与 /state。
+ *  签到一轮可能持续几分钟（浏览器 + 多平台并行），挂着 HTTP 等只会超时。
+ *  2026-11-05 起每平台一把独立浏览器锁：批量运行期间某个平台的登录窗口开着
+ *  也只会让那一个平台记「浏览器忙」，不再整体拒绝。 */
+app.post(
+  '/api/netcheckin/run',
+  wrap(async (req, res) => {
+    if (netCheckinBusy()) return res.status(409).json({ error: '已有一轮批量签到在运行，等它结束再试' });
+    const only = Array.isArray(req.body?.only) ? req.body.only : req.body?.only ? [String(req.body.only)] : [];
+    // 异步启动；netCheckinBusy 的置位发生在本次调用的同步段，不会有并发窗口
+    void runNetCheckin({ only, dryRun: Boolean(req.body?.dryRun), source: 'manual' });
+    res.json({ started: true });
+  })
+);
+
+/** 单平台详情（子页面）：状态行 + 该平台的全部领取记录 */
+app.get(
+  '/api/netcheckin/platform/:id',
+  wrap(async (req, res) => {
+    const detail = platformDetail(String(req.params.id || ''));
+    if (!detail) return res.status(404).json({ error: `没有这个平台: ${req.params.id}` });
+    res.json(detail);
+  })
+);
+
+/** 平台开关 */
+app.post(
+  '/api/netcheckin/toggle',
+  wrap(async (req, res) => {
+    const id = String(req.body?.id || '');
+    const enabled = Boolean(req.body?.enabled);
+    const cfg = loadNetCheckinConfig();
+    if (!resolveNetPlatforms(cfg).some((p) => p.id === id)) return res.status(400).json({ error: `没有这个平台: ${id}` });
+    cfg.platforms = { ...(cfg.platforms || {}), [id]: { ...(cfg.platforms?.[id] || {}), enabled } };
+    await saveNetCheckinConfig(cfg);
+    netStateCache = { at: 0, epoch: -1, data: null };
+    res.json({ ok: true });
+  })
+);
+
+/** 自动代领时间设置 */
+app.post(
+  '/api/netcheckin/schedule',
+  wrap(async (req, res) => {
+    const time = String(req.body?.time || '').trim();
+    const jitter = Number(req.body?.jitterMinutes);
+    if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(time)) return res.status(400).json({ error: '时间格式应为 HH:MM，例如 08:30' });
+    if (Number.isFinite(jitter) && (jitter < 0 || jitter > 120)) return res.status(400).json({ error: '随机延迟需在 0~120 分钟之间' });
+    const cfg = loadNetCheckinConfig();
+    cfg.schedule = {
+      enabled: req.body?.enabled === undefined ? cfg.schedule.enabled : Boolean(req.body.enabled),
+      time,
+      jitterMinutes: Number.isFinite(jitter) ? Math.round(jitter) : cfg.schedule.jitterMinutes,
+    };
+    await saveNetCheckinConfig(cfg);
+    netStateCache = { at: 0, epoch: -1, data: null };
+    res.json({ ok: true, schedule: cfg.schedule });
+  })
+);
+
+/** 去登录：弹浏览器窗口给网页类平台补登录态（结果靠轮询 /login/status） */
+app.post(
+  '/api/netcheckin/login/start',
+  wrap(async (req, res) => {
+    const r = await startLogin(String(req.body?.id || ''));
+    if (!r.ok) return res.status(400).json({ error: r.error });
+    res.json(r);
+  })
+);
+
+app.get(
+  '/api/netcheckin/login/status',
+  wrap(async (req, res) => {
+    res.json(loginState());
+  })
+);
+
+app.post(
+  '/api/netcheckin/login/cancel',
+  wrap(async (req, res) => {
+    res.json(await cancelLogin());
+  })
+);
+
+/** 运行日志增量拉取（前端在运行期间每 2 秒取一次） */
+app.get(
+  '/api/netcheckin/logs',
+  wrap(async (req, res) => {
+    const since = Number(req.query.since) || 0;
+    res.json(tailLogs(since));
+  })
+);
+
+// 进程内定时器：启动补领 + 每分钟巡检（控制台常驻，无需系统计划任务）
+startNetCheckinScheduler();
+
+
 /* ---------------- 反向代理（OpenAI 兼容，供其他 agent 调用） ---------------- */
 
 // 必须挂在静态资源与 SPA 兜底之前，否则 /v1/* 会被 index.html 吃掉

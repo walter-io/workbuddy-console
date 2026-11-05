@@ -8,7 +8,7 @@
 
 export interface NotificationItem {
   at: number;
-  type: 'ok' | 'err' | 'info';
+  type: 'ok' | 'err' | 'info' | 'warn';
   text: string;
 }
 

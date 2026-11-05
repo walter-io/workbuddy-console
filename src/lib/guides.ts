@@ -20,11 +20,11 @@ export interface Guide {
   tips?: string[];
 }
 
-export type GuideKey = 'accounts' | 'models' | 'keys' | 'quota' | 'proxy' | 'stats' | 'credits' | 'settings';
+export type GuideKey = 'accounts' | 'models' | 'keys' | 'quota' | 'proxy' | 'stats' | 'credits' | 'settings' | 'netcheckin';
 
 export const GUIDES: Record<GuideKey, Guide> = {
   accounts: {
-    title: '账号管理使用指南',
+    title: '账号切换使用指南',
     subtitle: '三步在多账号之间安全切换，并把对话带过去',
     steps: [
       {
@@ -196,19 +196,19 @@ export const GUIDES: Record<GuideKey, Guide> = {
 
   settings: {
     title: '设置使用指南',
-    subtitle: '工具本身的运行参数都在这一页',
+    subtitle: '工具本体的通用配置都在这一页',
     steps: [
       {
-        title: '数据目录',
-        desc: '自动探测 WorkBuddy 的数据目录（会话日志、models.json 都在这），探测不对时可以手工指定；改完统计与载入都会跟着走新目录。',
+        title: '先分清两页设置',
+        desc: '和 WorkBuddy 本体相关的设置（运行状态重启、每日签到与成长中心、凭据维护、数据/安装目录、备份恢复）在「WorkBuddy 管理 → WorkBuddy 设置」；本页只留通用项。',
       },
       {
-        title: '三个自动巡检开关',
-        desc: '每日签到（每小时巡检、启动时也补一次）、凭据自动刷新（每 6 小时验活，仅临期才刷新）、自动检查更新。都在本机执行，可随时关闭。',
+        title: '网络代理',
+        desc: '访问 OpenRouter 等海外平台时使用；留空自动探测环境变量与系统代理，均未命中则直连。',
       },
       {
-        title: '凭据与备份',
-        desc: '「账号凭据维护」可以手动检查并刷新临期凭据；「登录态备份与恢复」在改动登录态前留一份可回滚的快照。',
+        title: '全网签到自动领取',
+        desc: '各平台每天定时自动代领的时间与开关在这里调整；错过或失败后每小时检查一次，有没领的自动补跑。',
       },
       {
         title: '免费模型平台',
@@ -218,6 +218,37 @@ export const GUIDES: Record<GuideKey, Guide> = {
     tips: [
       '配置保存在 ~/.free-token/config.json，账号在 ~/.wb-switch，换机器时把这两个目录一起带走即可。',
       '「界面错误日志」是本地前端报错记录，遇到界面异常先把这里的内容发给开发者。',
+    ],
+  },
+
+  netcheckin: {
+    title: '全网签到使用指南',
+    subtitle: '把其他 AI 平台的每日福利交给控制台代领',
+    steps: [
+      {
+        title: '先弄清分工',
+        desc: 'WorkBuddy 账号的领取在「WorkBuddy 管理 → WorkBuddy 设置」（官方接口 + 成长中心）；本页管的是其他平台：网页版（智谱清言、MiniMax、扣子、即梦、哩布哩布、吐司、百度 Comate、Vidu）由内置浏览器代为操作，桌面版（豆包、Trae、Qoder）会临时接管客户端完成点击。',
+      },
+      {
+        title: '网页版平台先登录一次',
+        desc: '卡片显示「需登录」时点「登录」：会弹出浏览器窗口，扫码或输入手机号后自动记录并关闭窗口，全程不用回终端。登录态保存在本机，之后长期复用。',
+      },
+      {
+        title: '桌面版平台先装客户端',
+        desc: '卡片显示「未安装」说明本机没有对应的桌面程序；安装并登录后打开开关即可。程序开着也没关系——未开启调试通道时会自动重启一次来开启接管。豆包装在非默认目录时，在 ~/.free-token/checkin/config.json 的 platforms.doubao.app 写完整路径。',
+      },
+      {
+        title: '看徽章就知道该做什么',
+        desc: '「已到账 / 今日已领」不用管；「需登录」点登录；「未安装」先装客户端；「没找到入口 / 结果未确认」多半是平台改版，过段时间再试或到领取记录表里看过程。点平台名可进入该平台的详情子页：积分、连续天数、近 14 天领取情况和全部记录都在那里。',
+      },
+    ],
+    tips: [
+      '每个平台有独立的浏览器档案，检测 / 领取 / 登录都是按平台并行开工（批量任务同时最多 3 个浏览器、错峰启动）——单个平台卡住不影响其它平台和其他功能。',
+      '智谱清言直连官方接口领取，最稳；其他网页平台靠按钮文案匹配，平台改版后卡片会显示「没找到入口」。',
+      '百度 Comate 这类「要下载客户端/App 才能领」的平台：入口未命中时会主动弹提醒，不用翻运行记录。扣子是登录即送 60 积分/天，打开工作台就算领到。',
+      '豆包的「免费用豆包」活动页每天 200 额度、周一翻倍；领取成功后按钮会直接消失，引擎按「活动页还在但入口不在」判定已完成，不会重复点。',
+      '各平台的登录态按平台分别保存在 ~/.free-token/checkin/profiles/<平台>/，属于账号凭据，不要外传；想接入新平台，在 ~/.free-token/checkin/config.json 的 custom 数组里加一条即可。',
+      '多数平台用户协议禁止自动化，请只在本人设备、本人账号上使用，不要批量多账号。',
     ],
   },
 };

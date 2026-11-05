@@ -4,16 +4,14 @@ import {
   Button,
   Card,
   ConfirmProvider,
-  IconChart,
   IconDownload,
   IconGrid,
   IconRefresh,
   IconSettings,
   IconShield,
-  IconSwitch,
   IconUsers,
-  IconWallet,
   IconWarning,
+  IconZap,
   ToastProvider,
 } from './components/ui';
 import { get } from './lib/api';
@@ -21,35 +19,42 @@ import { onUpdateChecked } from './lib/appUpdate';
 import PageGuide from './components/PageGuide';
 import { GUIDES, type GuideKey } from './lib/guides';
 import type { AccountsResponse, AppUpdateInfo, LoadedInfo } from './lib/types';
-import StatsPage from './pages/StatsPage';
 import SettingsPage from './pages/SettingsPage';
-import AccountsPage from './pages/AccountsPage';
-import CreditStatsPage from './pages/CreditStatsPage';
-import ProxyPage from './pages/ProxyPage';
 import PlatformPage, { type PlatformTab } from './pages/PlatformPage';
+import WorkBuddyPage, { type WorkBuddyTab } from './pages/WorkBuddyPage';
+import NetCheckinPage from './pages/NetCheckinPage';
+
+const WB_TABS: WorkBuddyTab[] = ['accounts', 'stats', 'credits', 'proxy'];
+
 const TABS = [
-  { id: 'accounts', label: '账号管理', desc: '管理 WorkBuddy 账号，一键切换登录态', icon: IconUsers },
+  { id: 'workbuddy', label: 'WorkBuddy 管理', desc: '账号切换 · Token/积分统计 · 反向代理 · WorkBuddy 设置', icon: IconUsers },
   { id: 'platform', label: '免费模型', desc: '免费模型 · 平台额度 · API Keys', icon: IconGrid },
-  { id: 'proxy', label: '反向代理', desc: '让其他 agent 按 OpenAI / Anthropic / Responses / Gemini 协议调用 WorkBuddy', icon: IconSwitch },
-  { id: 'stats', label: 'Token 统计', desc: '本地解析会话日志，统计 Token 消耗与缓存命中', icon: IconChart },
-  { id: 'credits', label: '积分统计', desc: '官方逐请求用量：余额、每日趋势与模型分布', icon: IconWallet },
-  { id: 'settings', label: '设置', desc: 'WorkBuddy 数据目录、每日签到、备份与工具配置', icon: IconSettings },
+  { id: 'netcheckin', label: '全网签到', desc: '其他 AI 平台的每日福利交给控制台代领', icon: IconZap },
+  { id: 'settings', label: '设置', desc: '网络代理 · 全网签到自动领取 · 通知历史 · 界面错误日志 · 关于', icon: IconSettings },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
 
-/** 旧版地址兼容：免费模型/平台额度/API Keys 曾经是三个顶级入口 */
-const LEGACY_TABS: Record<string, { tab: TabId; platform: PlatformTab }> = {
-  models: { tab: 'platform', platform: 'models' },
-  quota: { tab: 'platform', platform: 'quota' },
-  keys: { tab: 'platform', platform: 'keys' },
+/** 旧版地址兼容：曾经是顶级入口的页签，按现在的归属跳到对应子页签 */
+const LEGACY_TABS: Record<string, { tab: TabId; platform: PlatformTab; wb: WorkBuddyTab }> = {
+  accounts: { tab: 'workbuddy', platform: 'models', wb: 'accounts' },
+  models: { tab: 'platform', platform: 'models', wb: 'accounts' },
+  quota: { tab: 'platform', platform: 'quota', wb: 'accounts' },
+  keys: { tab: 'platform', platform: 'keys', wb: 'accounts' },
+  proxy: { tab: 'workbuddy', platform: 'models', wb: 'proxy' },
+  stats: { tab: 'workbuddy', platform: 'models', wb: 'stats' },
+  credits: { tab: 'workbuddy', platform: 'models', wb: 'credits' },
 };
 
-/** 解析当前地址栏 hash → 页签（含子页签）；无法识别时回落到账号管理 */
-function resolveHash(): { tab: TabId; platform: PlatformTab } {
+/** 解析当前地址栏 hash → 页签（含子页签，如 #workbuddy/stats）；无法识别时回落到 WorkBuddy 管理 */
+function resolveHash(): { tab: TabId; platform: PlatformTab; wb: WorkBuddyTab } {
   const h = location.hash.replace('#', '').replace(/^\/+/, '');
   if (LEGACY_TABS[h]) return LEGACY_TABS[h];
-  return { tab: (TABS.some((t) => t.id === h) ? h : 'accounts') as TabId, platform: 'models' };
+  const [head, sub] = h.split('/');
+  if (head === 'workbuddy' && WB_TABS.includes(sub as WorkBuddyTab)) {
+    return { tab: 'workbuddy', platform: 'models', wb: sub as WorkBuddyTab };
+  }
+  return { tab: (TABS.some((t) => t.id === head) ? head : 'workbuddy') as TabId, platform: 'models', wb: 'accounts' };
 }
 
 function currentTab(): TabId {
@@ -116,7 +121,7 @@ function VersionFooter() {
   );
 }
 
-/** 顶栏：当前登录的 WorkBuddy 账号（60s 轮询），点击进账号管理 */
+/** 顶栏：当前登录的 WorkBuddy 账号（60s 轮询），点击进「WorkBuddy 管理 → 账号切换」 */
 function CurrentAccountChip({ onClick }: { onClick: () => void }) {
   const [data, setData] = useState<AccountsResponse | null>(null);
 
@@ -131,7 +136,7 @@ function CurrentAccountChip({ onClick }: { onClick: () => void }) {
   const cur = data.current;
   if (!cur?.exists) {
     return (
-      <button onClick={onClick} title="未检测到 WorkBuddy 登录态，点击前往账号管理">
+      <button onClick={onClick} title="未检测到 WorkBuddy 登录态，点击前往「WorkBuddy 管理 → 账号切换」">
         <Badge color="amber" dot>
           未登录
         </Badge>
@@ -263,6 +268,8 @@ export default function App() {
   const [tab, setTab] = useState<TabId>(initial.tab);
   // 平台页子页签：由 App 持有，顶栏入口（如 OpenRouter 额度徽标）才能直接跳到指定子页签
   const [platformTab, setPlatformTab] = useState<PlatformTab>(initial.platform);
+  // WorkBuddy 管理页子页签：同理，顶栏账号徽标要能直接跳到「账号切换」
+  const [wbTab, setWbTab] = useState<WorkBuddyTab>(initial.wb);
   // 访问过的页签保持挂载（仅隐藏），切换不重新加载数据、不丢筛选状态
   const [visited, setVisited] = useState<Set<TabId>>(() => new Set([initial.tab]));
 
@@ -271,6 +278,7 @@ export default function App() {
       const r = resolveHash();
       setTab(r.tab);
       if (r.tab === 'platform') setPlatformTab(r.platform);
+      if (r.tab === 'workbuddy') setWbTab(r.wb);
     };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
@@ -280,8 +288,8 @@ export default function App() {
     setVisited((v) => (v.has(tab) ? v : new Set(v).add(tab)));
   }, [tab]);
 
-  const go = (id: TabId) => {
-    location.hash = id;
+  const go = (id: TabId, sub?: string) => {
+    location.hash = sub ? `${id}/${sub}` : id;
     setTab(id);
   };
 
@@ -291,13 +299,20 @@ export default function App() {
     go('platform');
   };
 
+  /** 跳到 WorkBuddy 管理页的指定子页签（账号切换 / Token 统计 / 积分统计 / 反向代理） */
+  const goWorkBuddy = (sub: WorkBuddyTab) => {
+    setWbTab(sub);
+    go('workbuddy', sub);
+  };
+
   const meta = TABS.find((t) => t.id === tab)!;
 
   /**
    * 当前该显示哪份使用指南。
-   * 「免费模型」是一个入口三个子页签，所以平台页要按 platformTab 细分，其余页面按 tab 一一对应。
+   * 「免费模型」与「WorkBuddy 管理」都是一个入口多个子页签，按各自的子页签细分，
+   * 其余页面按 tab 一一对应；WorkBuddy 设置沿用设置页的指南。
    */
-  const currentGuide: GuideKey = tab === 'platform' ? platformTab : tab;
+  const currentGuide: GuideKey = tab === 'platform' ? platformTab : tab === 'workbuddy' ? (wbTab === 'wbsettings' ? 'settings' : wbTab) : tab;
 
   return (
     <ToastProvider>
@@ -311,7 +326,7 @@ export default function App() {
               </div>
               <div className="min-w-0">
                 <div className="font-semibold text-zinc-900 leading-tight">workbuddy控制台</div>
-                <div className="text-[11px] text-zinc-400 leading-tight">账号 · 模型 · 用量</div>
+                <div className="text-[11px] text-zinc-400 leading-tight">账号 · 模型 · 用量 · 签到</div>
               </div>
             </div>
 
@@ -322,7 +337,7 @@ export default function App() {
                 return (
                   <button
                     key={t.id}
-                    onClick={() => go(t.id)}
+                    onClick={() => go(t.id, t.id === 'workbuddy' ? wbTab : undefined)}
                     className={`relative flex items-center gap-2.5 px-3 h-9.5 rounded-xl text-sm transition-all duration-150 ${
                       on ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
                     }`}
@@ -354,7 +369,7 @@ export default function App() {
                 {TABS.map((t) => (
                   <button
                     key={t.id}
-                    onClick={() => go(t.id)}
+                    onClick={() => go(t.id, t.id === 'workbuddy' ? wbTab : undefined)}
                     className={`px-3 h-8 rounded-xl text-xs whitespace-nowrap transition-colors ${
                       tab === t.id ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-zinc-500 hover:bg-zinc-100'
                     }`}
@@ -373,7 +388,7 @@ export default function App() {
                 {/* 每个功能右上角都有使用指南：内容按当前页（含免费模型的三个子页签）切换 */}
                 <PageGuide guide={GUIDES[currentGuide]} />
                 <div className="max-md:hidden">
-                  <CurrentAccountChip onClick={() => go('accounts')} />
+                  <CurrentAccountChip onClick={() => goWorkBuddy('accounts')} />
                 </div>
                 <div className="max-md:hidden">
                   <WorkBuddyStatus onClick={() => goPlatform('models')} />
@@ -386,11 +401,9 @@ export default function App() {
                 <ServiceBanner />
                 {[...visited].map((id) => (
                   <div key={id} className={tab === id ? '' : 'hidden'}>
-                    {id === 'accounts' && <AccountsPage />}
+                    {id === 'workbuddy' && <WorkBuddyPage tab={wbTab} onTabChange={setWbTab} />}
                     {id === 'platform' && <PlatformPage tab={platformTab} onTabChange={setPlatformTab} />}
-                    {id === 'stats' && <StatsPage />}
-                    {id === 'credits' && <CreditStatsPage />}
-                    {id === 'proxy' && <ProxyPage />}
+                    {id === 'netcheckin' && <NetCheckinPage />}
                     {id === 'settings' && <SettingsPage />}
                   </div>
                 ))}

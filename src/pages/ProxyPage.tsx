@@ -20,6 +20,7 @@ import {
   PageSection,
   Segmented,
   StatCard,
+  Switch,
   Toolbar,
   useToast,
 } from '../components/ui';
@@ -514,7 +515,7 @@ export default function ProxyPage() {
         }
       >
         {data.accounts.length === 0 ? (
-          <EmptyState icon={<IconKey />} title="账号库里还没有账号" desc="请先到「账号管理」扫码添加或导入本机登录态" />
+          <EmptyState icon={<IconKey />} title="账号库里还没有账号" desc="请先到「WorkBuddy 管理 → 账号切换」扫码添加或导入本机登录态" />
         ) : (
           <Card className="divide-y divide-zinc-100">
             {data.accounts.map((a) => (
@@ -589,15 +590,7 @@ export default function ProxyPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-2 text-sm text-zinc-600 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={data.enabled}
-                onChange={(e) => void toggleEnabled(e.target.checked)}
-                className="accent-indigo-600 rounded"
-              />
-              {data.enabled ? '已开启反向代理' : '开启反向代理'}
-            </label>
+            <Switch checked={data.enabled} onChange={(v) => void toggleEnabled(v)} onText="已开启反向代理" offText="开启反向代理" />
             <Button size="sm" variant="subtle" loading={testing} onClick={() => void runTest()} disabled={!data.enabled || !data.poolCount}>
               <IconZap className="w-3.5 h-3.5" />
               连通性自检
@@ -698,7 +691,7 @@ export default function ProxyPage() {
                 ? '请在上方「参与轮换的账号」里至少勾选一个账号。'
                 : usableCount > 0
                   ? '可用的账号只有桌面端当前登录的那个——该账号不参与代理出站（避免同一账号被上游风控连坐官方客户端）。请先切换客户端登录账号，或再导入一个账号。'
-                  : '账号库里没有可用于出站请求的账号（需要扫码登录导入的明文凭据），请先到「账号管理」添加。'}
+                  : '账号库里没有可用于出站请求的账号（需要扫码登录导入的明文凭据），请先到「WorkBuddy 管理 → 账号切换」添加。'}
             </Note>
           </div>
         )}

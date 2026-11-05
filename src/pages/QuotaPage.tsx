@@ -17,6 +17,7 @@ import {
   ProgressBar,
   Skeleton,
   StatCard,
+  Switch,
   Toolbar,
   useToast,
 } from '../components/ui';
@@ -341,10 +342,7 @@ export default function QuotaPage({ active = true, onGoKeys }: { active?: boolea
           {data && (
             <span className="text-xs text-zinc-400 tabular-nums">更新于 {new Date(data.fetchedAt).toLocaleTimeString('zh-CN')}</span>
           )}
-          <label className="flex items-center gap-1.5 text-xs text-zinc-500 cursor-pointer select-none">
-            <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} className="accent-indigo-600 rounded" />
-            每 60 秒自动刷新
-          </label>
+          <Switch checked={autoRefresh} onChange={setAutoRefresh} onText="60 秒自动刷新" offText="60 秒自动刷新" title="开启后每 60 秒自动刷新一次额度数据" />
           <Button variant="subtle" loading={refreshing} onClick={() => load(true)}>
             <IconRefresh className="w-4 h-4" />
             刷新

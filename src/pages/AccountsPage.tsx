@@ -28,6 +28,7 @@ import {
   Segmented,
   Skeleton,
   Spinner,
+  Switch,
   Toolbar,
   useConfirm,
   useToast,
@@ -1370,23 +1371,20 @@ function StopAppRow({
   children?: React.ReactNode;
 }) {
   return (
-    <label
+    <div
+      onClick={() => !disabled && onChange(!checked)}
       className={`mt-3 flex items-start gap-2 rounded-xl border px-3 py-2.5 ${
         disabled ? 'cursor-not-allowed border-zinc-200 bg-zinc-50' : 'cursor-pointer border-indigo-200 bg-indigo-50/60'
       }`}
     >
-      <input
-        type="checkbox"
-        className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-indigo-600"
-        checked={checked}
-        disabled={disabled}
-        onChange={(e) => onChange(e.target.checked)}
-      />
+      <span className="mt-0.5" onClick={(e) => e.stopPropagation()}>
+        <Switch checked={checked} disabled={disabled} onChange={onChange} onText="" offText="" />
+      </span>
       <span className="text-xs leading-relaxed text-indigo-900">
         <b>自动退出 WorkBuddy</b>：由本工具结束后台的全部 WorkBuddy 进程，确认退出后才执行，不再需要你手动关闭。
         {children}
       </span>
-    </label>
+    </div>
   );
 }
 
@@ -1418,31 +1416,41 @@ function CopyOnSwitchToggle({ flagRef }: { flagRef: { current: boolean } }) {
   if (CROSS_ACCOUNT_SESSION_OPS_DISABLED) {
     flagRef.current = false;
     return (
-      <label className="mt-2 flex cursor-not-allowed items-start gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 opacity-70">
-        <input type="checkbox" className="mt-0.5 h-3.5 w-3.5 shrink-0" checked={false} disabled />
+      <div className="mt-2 flex cursor-not-allowed items-start gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 opacity-70">
+        <span className="mt-0.5">
+          <Switch checked={false} disabled onChange={() => {}} onText="" offText="" />
+        </span>
         <span className="text-xs leading-relaxed text-zinc-500">
           <b>同时复制会话（已停用）</b>：上游风控会识别跨账号会话重放并批量封禁关联账号
           （2026-10-29 实测），该功能已临时关闭。
         </span>
-      </label>
+      </div>
     );
   }
   return (
-    <label className="mt-2 flex cursor-pointer items-start gap-2 rounded-xl border border-indigo-200 bg-indigo-50/60 px-3 py-2.5">
-      <input
-        type="checkbox"
-        className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-indigo-600"
-        checked={on}
-        onChange={(e) => {
-          setOn(e.target.checked);
-          flagRef.current = e.target.checked;
-        }}
-      />
+    <div
+      onClick={() => {
+        setOn(!on);
+        flagRef.current = !on;
+      }}
+      className="mt-2 flex cursor-pointer items-start gap-2 rounded-xl border border-indigo-200 bg-indigo-50/60 px-3 py-2.5"
+    >
+      <span className="mt-0.5" onClick={(e) => e.stopPropagation()}>
+        <Switch
+          checked={on}
+          onChange={(v) => {
+            setOn(v);
+            flagRef.current = v;
+          }}
+          onText=""
+          offText=""
+        />
+      </span>
       <span className="text-xs leading-relaxed text-indigo-900">
         <b>同时复制会话</b>：把当前账号的会话也带给这个账号。勾选后会先打开会话选择列表，
         由你挑要复制哪些（复制用的是新会话 id，源账号的数据不受影响）。
       </span>
-    </label>
+    </div>
   );
 }
 

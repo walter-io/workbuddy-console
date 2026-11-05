@@ -31,6 +31,7 @@ import {
   Skeleton,
   Spinner,
   StatCard,
+  Switch,
   Toolbar,
   useToast,
 } from '../components/ui';
@@ -419,10 +420,7 @@ export default function StatsPage() {
               </span>
             )
           )}
-          <label className="flex items-center gap-1.5 text-xs text-zinc-500 cursor-pointer select-none">
-            <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} className="accent-indigo-600 rounded" />
-            每 60 秒自动刷新
-          </label>
+          <Switch checked={autoRefresh} onChange={setAutoRefresh} onText="60 秒自动刷新" offText="60 秒自动刷新" title="开启后每 60 秒自动重新扫描统计" />
           <Button variant="subtle" onClick={exportCsv} disabled={!data} title="导出当前筛选下的统计数据为 CSV">
             <IconDownload className="w-4 h-4" />
             导出 CSV
