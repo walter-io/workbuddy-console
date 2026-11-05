@@ -50,6 +50,7 @@ export default function NetPlatformDetail({
   trial,
   login,
   onBack,
+  showBack = true,
   onRefresh,
   onRun,
   onToggle,
@@ -61,6 +62,8 @@ export default function NetPlatformDetail({
   trial?: { status: string; detail: string };
   login: LoginStatus | null;
   onBack: () => void;
+  /** 页签视图下顶栏已有页签条，返回按钮冗余；列表/深链场景显示 */
+  showBack?: boolean;
   onRefresh: () => void;
   onRun: (id: string, opts?: { dryRun?: boolean }) => void;
   onToggle: (id: string, enabled: boolean) => void;
@@ -97,10 +100,12 @@ export default function NetPlatformDetail({
   if (loadErr && !p) {
     return (
       <div className="space-y-4">
-        <Button size="sm" variant="ghost" onClick={onBack}>
-          <IconChevronLeft className="w-4 h-4" />
-          返回清单
-        </Button>
+        {showBack && (
+          <Button size="sm" variant="ghost" onClick={onBack}>
+            <IconChevronLeft className="w-4 h-4" />
+            返回清单
+          </Button>
+        )}
         <Card className="p-10">
           <EmptyState icon={<IconZap />} title="加载失败" desc={loadErr} />
         </Card>
@@ -145,10 +150,12 @@ export default function NetPlatformDetail({
     <div className="space-y-8">
       {/* 顶部：返回 + 平台身份 + 操作 */}
       <div className="flex flex-wrap items-center gap-3">
-        <Button size="sm" variant="ghost" onClick={onBack}>
-          <IconChevronLeft className="w-4 h-4" />
-          返回清单
-        </Button>
+        {showBack && (
+          <Button size="sm" variant="ghost" onClick={onBack}>
+            <IconChevronLeft className="w-4 h-4" />
+            返回清单
+          </Button>
+        )}
         <div className={`w-11 h-11 rounded-xl flex items-center justify-center text-lg font-semibold shrink-0 ${avatarCls(p.id)}`}>
           {p.name.slice(0, 1)}
         </div>
