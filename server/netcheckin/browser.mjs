@@ -120,7 +120,7 @@ const contexts = new Map();
  * 打开（或复用）key 平台的持久化上下文。调用方必须持有 lockFor(key)。
  * headless 参数只在首开时生效；复用时以已开实例为准（调用方按返回值感知）。
  */
-export async function acquireContext(key, { headless = true, logger } = {}) {
+export async function acquireContext(key, { headless = true, logger, proxy } = {}) {
   if (!pw) pw = await loadPlaywright();
 
   const cur = contexts.get(key);
@@ -153,6 +153,12 @@ export async function acquireContext(key, { headless = true, logger } = {}) {
 
   // 无头时优先用「新 headless」通道：旧 headless shell 的 UA/指纹特征更明显
   if (headless) opts.channel = 'chromium';
+
+  // proxy='direct'：强制直连。Chromium 默认跟 Windows 系统代理，本机开着 Clash 时
+  // 境外节点不通的站点（pixverse 实测）会全部超时，直连反而能过（实测 2s 打开）。
+  // 注意不能用 opts.proxy={server:'direct://'}——playwright 下不生效（实测仍报代理错误），
+  // 得用 --no-proxy-server 启动参数
+  if (proxy === 'direct') opts.args.push('--no-proxy-server');
 
   let ctx;
   try {

@@ -321,6 +321,8 @@ export interface OAuthPollResult {
 }
 
 export interface AccountsResponse {
+  /** 跨账号会话操作（转到此账号 / 同时复制会话）总闸：跟随设置页开关，前端据此放行/置灰入口 */
+  crossAccountOps: boolean;
   accounts: AccountInfo[];
   current: {
     variant: string;
@@ -622,6 +624,8 @@ export interface SettingsInfo {
   autoCheckUpdate: boolean;
   /** 免费模型页是否列出全部平台（含地区受限 / 平台禁止外部接入的）；默认只列可用的 */
   unlockAllPlatforms: boolean;
+  /** 跨账号会话操作（转到此账号 / 同时复制会话）总闸；默认关闭（上游风控连坐封号风险） */
+  allowCrossAccountOps: boolean;
   effectiveProxy: string | null;
   detected: WorkbuddyDetection;
   cacheDir: string;

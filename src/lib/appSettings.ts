@@ -14,7 +14,7 @@ const SETTINGS_CHANGED_EVENT = 'wb:settings-changed';
 export type SettingsPatch = Partial<
   Pick<
     SettingsInfo,
-    'autoCheckin' | 'autoRefreshToken' | 'autoCheckUpdate' | 'unlockAllPlatforms' | 'workbuddyDir' | 'proxyUrl'
+    'autoCheckin' | 'autoRefreshToken' | 'autoCheckUpdate' | 'unlockAllPlatforms' | 'allowCrossAccountOps' | 'workbuddyDir' | 'proxyUrl'
   >
 >;
 

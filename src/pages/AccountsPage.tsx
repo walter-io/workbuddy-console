@@ -22,6 +22,7 @@ import {
   IconUser,
   IconUsers,
   IconWarning,
+  IconLayers,
   Modal,
   Hint,
   SectionHeader,
@@ -35,7 +36,8 @@ import {
 } from '../components/ui';
 import { del, get, patch, post, TIMEOUT } from '../lib/api';
 import { BRAND_MARKS } from '../lib/modelBrands';
-import { CROSS_ACCOUNT_OPS_REASON, CROSS_ACCOUNT_SESSION_OPS_DISABLED } from '../lib/riskGates';
+import { CROSS_ACCOUNT_OPS_REASON, SYNC_DEDUPE_DISABLED, SYNC_DEDUPE_REASON } from '../lib/riskGates';
+import { onSettingsChanged } from '../lib/appSettings';
 import { BanRiskGuide } from '../components/BanRiskGuide';
 import { fmtDateTime } from '../lib/format';
 import type {
@@ -403,6 +405,7 @@ function AccountCard({
   limitNote,
   balanceLoading,
   authInvalid,
+  crossOps,
   onSwitch,
   onSyncSessions,
   onRefreshToken,
@@ -421,6 +424,8 @@ function AccountCard({
   balanceLoading: boolean;
   /** 官方接口已明确拒绝该账号的凭据（401/403）——本地未过期也不算数 */
   authInvalid: boolean;
+  /** 跨账号会话操作总闸（设置页「跨账号会话操作」）：false 时置灰「转到此账号」 */
+  crossOps: boolean;
   onSwitch: () => void;
   onSyncSessions: () => void;
   onRefreshToken: () => void;
@@ -628,10 +633,10 @@ function AccountCard({
         <Button
           size="sm"
           className="h-7 rounded-full px-2.5 pr-3.5 text-xs"
-          disabled={isCurrent || busy || CROSS_ACCOUNT_SESSION_OPS_DISABLED}
+          disabled={isCurrent || busy || !crossOps}
           onClick={onSyncSessions}
           title={
-            CROSS_ACCOUNT_SESSION_OPS_DISABLED
+            !crossOps
               ? CROSS_ACCOUNT_OPS_REASON
               : isCurrent
                 ? '这就是当前正在使用的账号，源与目标相同，无需转移会话'
@@ -1408,12 +1413,124 @@ function StopAppToggleRef({ flagRef }: { flagRef: { current: boolean } }) {
 }
 
 /**
+ * 账号迁移弹窗（跨机迁移）：导出走附件下载；导入用原生 fetch 直传二进制（包很小）。
+ * 入口在「添加与迁移账号」工具条，「导入国内版/国际版」的后面——迁移到另一台机器
+ * 与导入本机登录态是同一类动作，放在一起比藏在设置页里好找。
+ */
+function AccountPackDialog({ open, onClose, onImported }: { open: boolean; onClose: () => void; onImported: () => void }) {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const doExport = async () => {
+    setExporting(true);
+    try {
+      // 用 fetch 拿 blob 而不是直接 <a href>：失败时能把错误当 JSON 弹出来
+      const res = await fetch('/api/workbuddy/account-pack/export');
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || `导出失败（HTTP ${res.status}）`);
+      }
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+      const name = m ? decodeURIComponent(m[1]) : 'wb-account-pack.tar.gz';
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('ok', `账号包已导出（${res.headers.get('X-Pack-Accounts') || '?'} 个账号）——文件在浏览器下载目录`);
+    } catch (e: any) {
+      toast('err', e?.message || '导出失败');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const doImport = async (file: File) => {
+    const ok = await confirm({
+      title: '导入账号包',
+      message: (
+        <>
+          将按 <b>id 合并</b>进本机账号库：包里已有的账号以包内凭据为准（新机器刷新后源机器的会失效）。
+          <br />
+          继续吗？
+        </>
+      ),
+      confirmText: '导入',
+    });
+    if (!ok) return;
+    setImporting(true);
+    setImportResult(null);
+    try {
+      const res = await fetch('/api/workbuddy/account-pack/import?mode=merge', {
+        method: 'PUT',
+        body: file,
+        headers: { 'Content-Type': 'application/octet-stream' },
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || `导入失败（HTTP ${res.status}）`);
+      const msg = `导入完成：新增 ${body.added} 个，更新 ${body.updated} 个（导出于 ${fmtDateTime(new Date(body.exportedAt).getTime())}）${body.checkinApplied ? '，签到配置已同步' : ''}`;
+      setImportResult(msg);
+      toast('ok', '账号包导入成功——点账号卡片上的「切换账号」即可写入本机登录态');
+      onImported();
+    } catch (e: any) {
+      toast('err', e?.message || '导入失败');
+    } finally {
+      setImporting(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="账号迁移到另一台电脑" width="max-w-xl">
+      <div className="text-xs text-zinc-500 leading-relaxed space-y-3">
+        <div>
+          把本机账号库整体带走：导出账号包（tar.gz，含账号凭据与控制台/签到设置）→ 拷到目标电脑 → 在目标电脑的控制台打开本弹窗点「导入账号包」。
+        </div>
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-700">
+          ⚠️ 包文件含明文 token，<b>只在本机之间传递，不要发给别人</b>。refresh_token 是轮换式的——
+          新机器刷新一次后旧机器上同账号的凭据立即作废，迁移是「搬家」不是「复制」：导入验证成功后请停用源机器的自动签到 / 凭据巡检。
+        </div>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <Button variant="primary" size="sm" loading={exporting} onClick={doExport}>
+            导出账号包
+          </Button>
+          <Button variant="subtle" size="sm" disabled={importing} onClick={() => fileRef.current?.click()}>
+            导入账号包
+          </Button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".tar.gz,.gz,.tgz"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) doImport(f);
+            }}
+          />
+        </div>
+        {importResult && <div className="text-emerald-600">{importResult}</div>}
+        <div>
+          导入成功后：点账号卡片上的<b>「切换账号」</b>，凭据就会写入本机的 WorkBuddy 登录态文件，桌面客户端即恢复登录。
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
  * 切换确认框里的「同时复制会话」勾选（同样只能自己持有状态 + 写外部 ref，原因见上）。
  */
-function CopyOnSwitchToggle({ flagRef }: { flagRef: { current: boolean } }) {
+function CopyOnSwitchToggle({ flagRef, enabled }: { flagRef: { current: boolean }; enabled: boolean }) {
   const [on, setOn] = useState(false);
-  // 跨账号会话操作总闸：置灰「同时复制会话」，勾选状态强制为关
-  if (CROSS_ACCOUNT_SESSION_OPS_DISABLED) {
+  // 跨账号会话操作总闸（设置页开关，默认关）：关闭时置灰「同时复制会话」，勾选状态强制为关
+  if (!enabled) {
     flagRef.current = false;
     return (
       <div className="mt-2 flex cursor-not-allowed items-start gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 opacity-70">
@@ -1421,8 +1538,8 @@ function CopyOnSwitchToggle({ flagRef }: { flagRef: { current: boolean } }) {
           <Switch checked={false} disabled onChange={() => {}} onText="" offText="" />
         </span>
         <span className="text-xs leading-relaxed text-zinc-500">
-          <b>同时复制会话（已停用）</b>：上游风控会识别跨账号会话重放并批量封禁关联账号
-          （2026-10-29 实测），该功能已临时关闭。
+          <b>同时复制会话（默认关闭）</b>：上游风控会识别跨账号会话重放并批量封禁关联账号
+          （2026-10-29 实测）。可在「设置 → 账号与会话」里开启后使用。
         </span>
       </div>
     );
@@ -1956,6 +2073,8 @@ export default function AccountsPage() {
   const [pkgTarget, setPkgTarget] = useState<AccountInfo | null>(null);
   /** 扫码添加账号弹窗（OAuth 设备码流程） */
   const [scanOpen, setScanOpen] = useState(false);
+  /** 账号迁移弹窗（跨机导出/导入账号包） */
+  const [packOpen, setPackOpen] = useState(false);
   /** 申诉与风险指引弹层（限制徽章点击 / 页头按钮共用） */
   const [riskGuideOpen, setRiskGuideOpen] = useState(false);
   /** 档位筛选：与 workbuddy-switch 一致，两套登录态分开管理 */
@@ -1976,11 +2095,15 @@ export default function AccountsPage() {
   const [summaryBusy, setSummaryBusy] = useState(false);
   /** 一键去重的进行态 */
   const [dedupeBusy, setDedupeBusy] = useState(false);
+  /** 跨账号会话操作总闸（设置页「跨账号会话操作」，默认关）：放行「转到此账号」与「同时复制会话」。
+   *  页面常驻挂载，只靠 /api/accounts 取值会错过设置页的改动——初值随 load() 来，
+   *  之后靠设置变更广播就地刷新（与免费模型页「显示全部平台」同一套机制） */
+  const [crossOps, setCrossOps] = useState(false);
 
   /** 一键去重：同账号内重复会话合并成一份（先预演再确认执行） */
   const dedupeNow = async () => {
-    if (CROSS_ACCOUNT_SESSION_OPS_DISABLED) {
-      toast('info', CROSS_ACCOUNT_OPS_REASON);
+    if (SYNC_DEDUPE_DISABLED) {
+      toast('info', SYNC_DEDUPE_REASON);
       return;
     }
     setDedupeBusy(true);
@@ -2032,8 +2155,8 @@ export default function AccountsPage() {
 
   /** 一键同步：全部本机账号两两对齐（内容并集取最新 + 改名跟随），可选补全缺失会话 */
   const syncAllNow = async (fillMissing: boolean, pruneOthers = false) => {
-    if (CROSS_ACCOUNT_SESSION_OPS_DISABLED) {
-      toast('info', CROSS_ACCOUNT_OPS_REASON);
+    if (SYNC_DEDUPE_DISABLED) {
+      toast('info', SYNC_DEDUPE_REASON);
       return;
     }
     setSyncAllBusy(true);
@@ -2125,13 +2248,20 @@ export default function AccountsPage() {
 
   const load = useCallback(async () => {
     try {
-      setData(await get<AccountsResponse>('/api/accounts'));
+      const r = await get<AccountsResponse>('/api/accounts');
+      setData(r);
+      setCrossOps(r.crossAccountOps === true);
     } catch (e: any) {
       toast('err', e?.message || '读取账号失败');
     } finally {
       setLoading(false);
     }
   }, [toast]);
+
+  // 设置页开/关「跨账号会话操作」后就地生效，不用重进账号页
+  useEffect(() => onSettingsChanged((patch) => {
+    if ('allowCrossAccountOps' in patch) setCrossOps(patch.allowCrossAccountOps === true);
+  }), []);
 
   const loadBalances = useCallback(async (refresh = false) => {
     setBalanceLoading(true);
@@ -2306,10 +2436,11 @@ export default function AccountsPage() {
         <>
           将把账号「<b>{account.name}</b>」写入 WorkBuddy 登录态文件。
           <div className="mt-2.5 text-xs text-zinc-500 leading-relaxed">
-            切换前会自动备份当前登录态（~/.wb-switch/backups/）。
+            切换前会自动备份当前登录态（~/.wb-switch/backups/）。不勾选「同时复制会话」时
+            <b>只切换登录态，不会移动或复制任何会话</b>；两边账号各自的会话都保留在本地库里，切回原账号时都在。
           </div>
           <StopAppToggleRef flagRef={stopAppRef} />
-          <CopyOnSwitchToggle flagRef={copyOnSwitchRef} />
+          <CopyOnSwitchToggle flagRef={copyOnSwitchRef} enabled={crossOps} />
           <div className="mt-2 flex items-start gap-1.5 text-xs leading-relaxed text-zinc-400">
             <IconWarning className="w-3.5 h-3.5 shrink-0 mt-px text-amber-400" />
             <span>
@@ -2597,7 +2728,8 @@ export default function AccountsPage() {
           <div className="min-w-[200px] flex-1">
             <h2 className="text-sm font-semibold text-zinc-900">添加与迁移账号</h2>
             <p className="mt-1 text-xs leading-5 text-zinc-500">
-              扫码授权后自动采集账号入库；也可读取本机 WorkBuddy 登录态文件迁移已有账号，已存在的只更新凭据、保留本地备注
+              扫码授权后自动采集账号入库；也可读取本机 WorkBuddy 登录态文件迁移已有账号，已存在的只更新凭据、保留本地备注。
+              要搬到另一台电脑时用「账号迁移」导出/导入账号包。
             </p>
             {activeVariant && (
               <p className="mt-1.5 truncate font-mono text-[11px] text-zinc-400" title={activeVariant.authFilePath}>
@@ -2637,6 +2769,15 @@ export default function AccountsPage() {
                 导入{v.label}
               </Button>
             ))}
+            <Button
+              variant="subtle"
+              className="h-9 px-3.5"
+              onClick={() => setPackOpen(true)}
+              title="把账号库导出成账号包搬到另一台电脑的控制台，或在别的电脑导出的包导入进来"
+            >
+              <IconLayers className="w-3.5 h-3.5" />
+              账号迁移
+            </Button>
           </div>
         </div>
       </div>
@@ -2727,11 +2868,11 @@ export default function AccountsPage() {
               variant="primary"
               size="sm"
               loading={summaryBusy}
-              disabled={syncAllBusy || CROSS_ACCOUNT_SESSION_OPS_DISABLED}
+              disabled={syncAllBusy || SYNC_DEDUPE_DISABLED}
               onClick={() => syncAllNow(false, true)}
               title={
-                CROSS_ACCOUNT_SESSION_OPS_DISABLED
-                  ? CROSS_ACCOUNT_OPS_REASON
+                SYNC_DEDUPE_DISABLED
+                  ? SYNC_DEDUPE_REASON
                   : '把各账号（含国际版）独有的会话都并进当前账号，同一对话合并成一份；铺满后自动清理其他账号的冗余副本'
               }
             >
@@ -2741,11 +2882,11 @@ export default function AccountsPage() {
               variant="outline"
               size="sm"
               loading={dedupeBusy}
-              disabled={dedupeBusy || CROSS_ACCOUNT_SESSION_OPS_DISABLED}
+              disabled={dedupeBusy || SYNC_DEDUPE_DISABLED}
               onClick={dedupeNow}
               title={
-                CROSS_ACCOUNT_SESSION_OPS_DISABLED
-                  ? CROSS_ACCOUNT_OPS_REASON
+                SYNC_DEDUPE_DISABLED
+                  ? SYNC_DEDUPE_REASON
                   : '同名的同一对话只保留内容最完整的一份，其余副本删除（先预演确认，执行前自动备份）'
               }
             >
@@ -2779,6 +2920,7 @@ export default function AccountsPage() {
                 balanceLoading={balanceLoading && !balanceOf(a.id)}
                 authInvalid={authInvalidIds.has(a.id)}
                 onSwitch={() => doSwitch(a)}
+                crossOps={crossOps}
                 onSyncSessions={() => {
                   setSessionMode('copy');
                   setSessionTarget(a);
@@ -2817,6 +2959,7 @@ export default function AccountsPage() {
         onDone={load}
       />
       <PackagesDialog account={pkgTarget} balance={pkgTarget ? balanceOf(pkgTarget.id) : null} onClose={() => setPkgTarget(null)} />
+      <AccountPackDialog open={packOpen} onClose={() => setPackOpen(false)} onImported={load} />
       <ScanAddDialog
         open={scanOpen}
         variant={variant}

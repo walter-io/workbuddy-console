@@ -30,8 +30,10 @@ export async function pageVisibleText(page, limit = 20_000) {
 const LOGIN_URL_RE = /(login|signin|sign-in|passport|sso|oauth|authorize|account\/login)/i;
 const LOGIN_TEXT_RE =
   /(扫码登录|登录后|请先登录|手机号登录|验证码登录|账号登录|立即登录|登录\/注册|登录或注册|登录以同步|登录以使用|登录以查看|未登录)/;
-/** 已登录的强信号：出现任意一个就说明页面里的「登录」字样只是普通链接 */
-const LOGGED_IN_RE = /(退出登录|切换账号|个人中心|我的主页|账户设置|头像)/;
+/** 已登录的强信号：出现任意一个就说明页面里的「登录」字样只是普通链接。
+ *  注意不能放「头像」这类弱词：pai.video 的未登录首页模板文案里就有「头像」，
+ *  会被误判成已登录、跳过登录墙检查（2026-11-06 实测） */
+const LOGGED_IN_RE = /(退出登录|切换账号|个人中心|我的主页|账户设置)/;
 const LOGIN_BUTTON_TEXTS = ['登录', '立即登录', '登录/注册', '登录或注册', '扫码登录', '登录以同步历史会话', '登录以使用'];
 
 /**
@@ -54,26 +56,41 @@ export async function detectLoginWall(page, text) {
   const t = norm(text);
   if (LOGGED_IN_RE.test(t)) return { needLogin: false, reason: '' };
 
-  const hit = await page
-    .evaluate(
-      ({ texts }) => {
-        const norm = (s) => (s || '').replace(/[\s\u3000]+/g, '').trim();
-        for (const el of document.querySelectorAll('*')) {
-          const tt = norm(el.textContent);
-          if (!texts.includes(tt)) continue;
-          const st = getComputedStyle(el);
-          if (st.display === 'none' || st.visibility === 'hidden') continue;
-          const r = el.getBoundingClientRect();
-          if (r.width < 6 || r.height < 6) continue;
-          return tt;
-        }
-        return null;
-      },
-      { texts: LOGIN_BUTTON_TEXTS },
-    )
-    .catch(() => null);
+  const findLoginButton = () =>
+    page
+      .evaluate(
+        ({ texts }) => {
+          const norm = (s) => (s || '').replace(/[\s\u3000]+/g, '').trim();
+          for (const el of document.querySelectorAll('*')) {
+            const tt = norm(el.textContent);
+            if (!texts.includes(tt)) continue;
+            const st = getComputedStyle(el);
+            if (st.display === 'none' || st.visibility === 'hidden') continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 6 || r.height < 6) continue;
+            return tt;
+          }
+          return null;
+        },
+        { texts: LOGIN_BUTTON_TEXTS },
+      )
+      .catch(() => null);
 
+  const hit = await findLoginButton();
   if (hit) return { needLogin: true, reason: '登录已失效（页面上只剩登录入口）' };
+  // 慢渲染站（pai.video 实测）：topbar 和登录按钮可能晚 10 秒才画出来，单点检查会被
+  // 「页面还没水合」骗过去。轮询等页面定型——登录按钮出现=未登录；强登录信号出现=已登录；
+  // 文本长度连续两轮不变且始终没有登录按钮，才认定「已登录/无登录墙」放行
+  let lastLen = norm(text).length;
+  for (let i = 0; i < 8; i++) {
+    await sleep(1000);
+    const t2 = norm(await pageVisibleText(page, 4000).catch(() => ''));
+    if (LOGGED_IN_RE.test(t2)) return { needLogin: false, reason: '' };
+    const found = await findLoginButton();
+    if (found) return { needLogin: true, reason: '登录已失效（页面上只剩登录入口）' };
+    if (t2.length === lastLen && i >= 2) break; // 页面已定型，别干等满 8 秒
+    lastLen = t2.length;
+  }
   return { needLogin: false, reason: '' };
 }
 

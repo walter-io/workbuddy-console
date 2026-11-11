@@ -45,6 +45,8 @@ export interface NetPlatform {
   lastLoginAt: number | null;
   /** 最近一次查询到的积分余额（平台没报过数就是 null） */
   credits: number | null;
+  /** 余额的记账时间：流水带出来的用记录时间，balances 兜底用落盘时间 */
+  balanceAt?: number | null;
   /** 历史累计到账（只在引擎报过数时才有值） */
   totalGained: number | null;
   /** 累计成功领取次数 */
@@ -89,6 +91,8 @@ export interface NetState {
   /** 最近 200 条正式运行流水（新→旧），领取记录表的数据源 */
   recentResults: ResultRow[];
   manualPlatforms: ManualPlatform[];
+  /** 状态版本号：开关/定时等写操作时服务端自增，前端丢弃 rev 更小的过期响应 */
+  rev?: number;
 }
 
 export interface LogRow {
@@ -158,7 +162,6 @@ const AVATAR_TONES: Record<string, string> = {
   zhipu: 'bg-violet-50 text-violet-600',
   minimax: 'bg-amber-50 text-amber-600',
   wanxiang: 'bg-emerald-50 text-emerald-600',
-  coze: 'bg-blue-50 text-blue-600',
   jimeng: 'bg-cyan-50 text-cyan-700',
   liblib: 'bg-orange-50 text-orange-700',
   vidu: 'bg-lime-50 text-lime-700',
@@ -176,6 +179,9 @@ export function avatarCls(id: string): string {
 }
 
 export const fmtClock = (ts: number) => new Date(ts).toLocaleTimeString('zh-CN', { hour12: false });
+
+/** 领取记录每页条数（总览与平台详情共用）：服务端单表最多回 200 条，整表平铺会把页面拉爆 */
+export const RECORDS_PAGE_SIZE = 20;
 
 /** 14 天矩阵里一天的小色点 */
 export function matrixDotCls(status: CheckStatus | string): string {

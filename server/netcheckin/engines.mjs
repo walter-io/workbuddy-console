@@ -13,9 +13,9 @@
  */
 
 import fs from 'node:fs';
-import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { loadPlaywright } from './browser.mjs';
+import { sigCheck } from './loginsig.mjs';
 import {
   pageVisibleText,
   detectLoginWall,
@@ -33,6 +33,38 @@ import { resolveClientExe, isClientRunning, quitClientGracefully } from './regis
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const firstLine = (s) => String(s ?? '').split('\n')[0];
 
+/** 把 Chromium 的网络错误码翻译成人话（原始报错附在后面备查）：
+ *  实测最常撞上的是 ERR_TIMED_OUT——Cloudflare 站点偶发慢，重试通常就能过 */
+const NET_ERROR_HINTS = [
+  ['ERR_TIMED_OUT', '网络超时（站点响应慢或连接被拦，稍后重试通常能好）'],
+  ['ERR_CONNECTION_RESET', '连接被重置（站点可能被墙或风控掐断）'],
+  ['ERR_CONNECTION_CLOSED', '连接被关闭（代理节点不通或被墙；可试强制直连/稍后重试）'],
+  ['ERR_CONNECTION_REFUSED', '连接被拒绝（站点可能下线）'],
+  ['ERR_NAME_NOT_RESOLVED', '域名解析失败（网络不通或站点下线）'],
+  ['ERR_PROXY_CONNECTION_FAILED', '代理连不上'],
+  ['ERR_HTTP2_PROTOCOL_ERROR', 'HTTP/2 协议错误（站点或中间链路异常）'],
+  ['ERR_ABORTED', '加载被中断'],
+];
+const humanizeNetError = (e) => {
+  const raw = firstLine(e?.message || e);
+  const hit = NET_ERROR_HINTS.find(([code]) => raw.includes(code));
+  return hit ? `${hit[1]}（${raw.slice(0, 80)}）` : raw;
+};
+
+/** 按平台配置的余额正则从页面文本里抓积分余额（抓不到返回 null，绝不误报） */
+const captureCredits = (platform, text) => {
+  const pat = platform.creditsPattern;
+  if (!pat) return null;
+  try {
+    const m = new RegExp(pat).exec(text || '');
+    if (!m || !m[1]) return null;
+    const n = Number(String(m[1]).replace(/,/g, ''));
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+};
+
 /**
  * 声明式完成判定 doneRule: { present: [...], absent: [...] }。
  * 有些平台领完之后入口按钮直接消失（豆包的「立即签到」就没有变灰文案），
@@ -47,103 +79,6 @@ export function doneRuleHit(text, rule) {
   return present.every((k) => text.includes(k)) && absent.every((k) => !text.includes(k));
 }
 
-/* ======================================================================
- * 智谱清言：纯接口代领
- * ======================================================================
- * 签到不是按钮，而是页面加载时前端自动调用的接口，所以不需要找 DOM：
- *   POST /chatglm/member-api/member/daily_login_score  body {}
- *   - status=10001 → 今天已经领过；接口幂等，重复调用无副作用
- *   - 签名 X-Sign = md5(ts-nonce-secret)，appSecret 是前端 bundle
- *     里的公开常量（社区多个开源项目共同确认），不需要抓包
- *   - 本机设备标识放在 localStorage['chatglm-deid']，要跟 token 内嵌的 device_id 对得上
- *   - member-api 的鉴权接口必须带 Authorization: Bearer <chatglm_token>，
- *     只带 cookie 会一律 40003（bad request），与登录是否有效无关
- * 登录态是 cookie chatglm_token（约 24h）+ refresh_token（约 50 天）；
- * 页面加载时前端会自动调刷新接口续期，所以每次先打开一次首页即可。
- */
-
-const ZHIPU_APP_SECRET = '8a1317a7468aa3ad86e997d08f3f31cb';
-
-export function zhipuHeaders(deviceId, { appVersion = '2.0.7', token = '' } = {}) {
-  const ts = String(Date.now());
-  const nonce = randomBytes(16).toString('hex');
-  const sign = createHash('md5').update(`${ts}-${nonce}-${ZHIPU_APP_SECRET}`).digest('hex');
-  return {
-    'Content-Type': 'application/json',
-    'App-Name': 'chatglm',
-    'X-App-Platform': 'pc',
-    'X-App-Version': appVersion,
-    'X-Device-Id': deviceId,
-    'X-Timestamp': ts,
-    'X-Nonce': nonce,
-    'X-Sign': sign,
-    // member-api 的鉴权接口（member_info / daily_login_score）认 Bearer 头，
-    // 只靠 cookie 会一律 40003「bad request」——登录有效也会被当成失效
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
-}
-
-/** 从页面上下文取签名要用的两样东西：设备 ID + chatglm_token（可能是 HttpOnly，必须走 CDP 读） */
-export async function zhipuAuthMaterial(page) {
-  const ctx = page.context();
-  const [deid, token] = await Promise.all([
-    page.evaluate(() => localStorage.getItem('chatglm-deid') || '').catch(() => ''),
-    ctx
-      .cookies('https://chatglm.cn')
-      .then((cs) => cs.find((c) => c.name === 'chatglm_token' && c.value)?.value || '')
-      .catch(() => ''),
-  ]);
-  return { deid, token };
-}
-
-/**
- * 智谱登录态体检（登录检测与检测共用）：
- * 登录成功后 SPA 会跳进 /main/ 路由——这是站点自己的行为，最可靠；
- * 次选：cookie 存在时用带签名的 member_info 验证（裸调恒 40003，必须带 Bearer）。
- */
-export async function zhipuProbe(page) {
-  if (/chatglm\.cn\/main\//.test(page.url())) return { ok: true, why: '已进入登录后的界面' };
-  const cookies = await page.context().cookies('https://chatglm.cn').catch(() => []);
-  if (!cookies.some((c) => c.name === 'chatglm_token' && c.value)) return { ok: false, why: 'no-cookie' };
-  const { deid, token } = await zhipuAuthMaterial(page).catch(() => ({ deid: '', token: '' }));
-  if (!token) return { ok: false, why: 'no-cookie' };
-  const headers = zhipuHeaders(deid, { token });
-  const res = await page
-    .evaluate(async (headers) => {
-      try {
-        const r = await fetch('/chatglm/member-api/member/member_info', { headers, credentials: 'include' });
-        let code = '';
-        let message = '';
-        try {
-          const j = await r.json();
-          code = String(j?.status ?? j?.code ?? '');
-          message = String(j?.message || '');
-        } catch {
-          /* 非 JSON 响应 */
-        }
-        return { http: r.status, code, message };
-      } catch (e) {
-        return { http: 0, code: '', message: String(e).split('\n')[0] };
-      }
-    })
-    .catch(() => ({ http: -1, code: '', message: 'evaluate 失败' }));
-  const ok = res.http === 200 && (res.code === '' || res.code === '10000' || res.code === '0');
-  const pageUrl = page.url().replace(/^https?:\/\//, '').slice(0, 40);
-  const why = ok
-    ? 'cookie+接口有效'
-    : `接口 HTTP ${res.http}${res.code ? ` / ${res.code}` : ''}${res.message ? ` ${res.message}` : ''}（页面=${pageUrl}）`;
-  return { ok, why };
-}
-
-/** 智谱检测：领取走签名接口而非页面按钮，页面体检对它没有意义——直接验证登录态 */
-export async function zhipuProbeRun(page, logger) {
-  await openAndWait(page, 'https://chatglm.cn/', logger, { settle: 1200 });
-  const r = await zhipuProbe(page);
-  return r.ok
-    ? { status: 'dry_run', detail: `检测通过：登录态有效（${r.why}）` }
-    : { status: 'needs_login', detail: `登录态无效（${r.why}），点「登录」重新授权一次即可` };
-}
-
 /** 百度 Comate 检测：领取入口可能在 IDE 插件里，网页试运行只验证百度登录态 */
 export async function comateProbeRun(page, ctx, logger) {
   await openAndWait(page, 'https://comate.baidu.com/', logger, { settle: 1500 });
@@ -154,85 +89,6 @@ export async function comateProbeRun(page, ctx, logger) {
     : { status: 'needs_login', detail: '未检测到百度登录态，点「登录」重新授权一次' };
 }
 
-/** member_info 的 left_score 是 1/100 精度，转成日常数值 */
-function zhipuPoints(member) {
-  try {
-    const v = member?.json?.result?.left_score ?? member?.json?.result?.data?.left_score;
-    if (v === undefined || v === null) return null;
-    const n = Number(v) / 100;
-    return Number.isFinite(n) ? n : null;
-  } catch {
-    return null;
-  }
-}
-
-export async function runZhipu(page, logger) {
-  // 1) 打开首页：让前端自己完成 token 续期，同时确保同源（cookie 才会带上）
-  await openAndWait(page, 'https://chatglm.cn/', logger, { settle: 1500 });
-  await pageVisibleText(page, 2000);
-
-  // 2) 设备 ID 必须与 token 内 device_id 一致，否则接口返回 40003
-  const { deid, token } = await zhipuAuthMaterial(page);
-  if (!deid) logger?.warn?.('chatglm-deid 没取到，先用随机值顶替（有被当成陌生设备的风险）');
-  if (!token) logger?.warn?.('没拿到 chatglm_token（接口会报 40003，得重新登录）');
-  const headers = zhipuHeaders(deid || crypto.randomUUID(), { token });
-
-  // 3) 借页面自己的环境发请求：cookie、origin、UA 都是现成的
-  const res = await page.evaluate(
-    async ({ headers }) => {
-      const call = async (url, method = 'POST') => {
-        try {
-          const r = await fetch(url, {
-            method,
-            headers,
-            body: method === 'POST' ? '{}' : undefined,
-            credentials: 'include',
-          });
-          const text = await r.text();
-          let json = null;
-          try {
-            json = JSON.parse(text);
-          } catch {
-            /* 非 JSON 响应 */
-          }
-          return { http: r.status, json, text: text.slice(0, 300) };
-        } catch (e) {
-          return { http: 0, error: firstLine(e?.message || e) };
-        }
-      };
-      return {
-        checkin: await call('/chatglm/member-api/member/daily_login_score', 'POST'),
-        member: await call('/chatglm/member-api/member/member_info', 'GET'),
-      };
-    },
-    { headers },
-  );
-
-  const ck = res.checkin || {};
-  const body = ck.json || {};
-  const code = String(body.status ?? body.code ?? '');
-  logger?.step?.(`官方接口返回 HTTP ${ck.http}${ck.http >= 400 ? '（未放行，通常是登录态问题）' : ''}`);
-
-  if (ck.http === 401 || code === '40003' || code === '40102' || code === '401') {
-    return { status: 'needs_login', detail: '登录已失效，点「登录」重新授权一次即可' };
-  }
-  if (code === '10001') {
-    const pts = zhipuPoints(res.member);
-    return { status: 'already', detail: `今日已领取过${pts !== null ? `，当前积分 ${pts}` : ''}`, meta: { credits: pts } };
-  }
-  if (ck.http === 200 && (code === '10000' || code === '0' || code === '')) {
-    const pts = zhipuPoints(res.member);
-    const gained = body.result?.score ?? body.result?.left_score ?? null;
-    const gainTxt = gained !== null && gained !== undefined ? ` +${Number(gained) / (Number(gained) > 1000 ? 100 : 1)} 积分` : '';
-    return {
-      status: 'success',
-      detail: `领取成功${gainTxt}${pts !== null ? `，当前积分 ${pts}` : ''}`,
-      meta: { credits: pts, todayCredit: gained !== null ? Number(gained) : undefined },
-    };
-  }
-  return { status: 'failed', detail: `官方接口返回异常（HTTP ${ck.http}${body.message || body.msg ? `：${body.message || body.msg}` : ''}）` };
-}
-
 /* ======================================================================
  * 通用网页流程：打开入口 → 识别登录墙 → 找按钮 → 真实点击
  * ======================================================================
@@ -240,14 +96,35 @@ export async function runZhipu(page, logger) {
  * 平台改版后把新文案补进 config 的 keywords 即可，不用改代码。
  */
 
-export async function runGenericWeb(platform, page, logger) {
+export async function runGenericWeb(platform, page, logger, ctx) {
   const urls = platform.entryUrls.length ? platform.entryUrls : [platform.homepage];
   const lastReason = [];
-
+  // 登录凭据签名优先（登录窗口自动学的会话 cookie 名单）：全在=已登录，页面文案
+  // 判定整个跳过（SPA 慢渲染/悬停菜单/图标按钮都骗不了它）；全缺=失效直接报重登；
+  // 部分缺失或没有签名 → 走旧的文案逻辑（不武断，零行为回归）
+  const sig = ctx ? await sigCheck(platform, ctx).catch(() => 'none') : 'none';
+  if (sig === 'invalid') {
+    logger?.warn?.('登录凭据签名已全部消失 → 需要重新登录');
+    return { status: 'needs_login', detail: '登录凭据已失效（登录 cookie 不在了），点「重新登录」授权一次', url: platform.loginUrl || platform.homepage };
+  }
   for (const url of urls) {
     let text = '';
     try {
       await openAndWait(page, url, logger);
+    } catch (e) {
+      // 站点偶发超时很常见（Cloudflare 慢、风控抖动），先原地对同一入口重试一次再换下一个
+      const why = humanizeNetError(e);
+      logger?.warn?.(`${url} 打开失败: ${why}，重试一次…`);
+      await sleep(3000);
+      try {
+        await openAndWait(page, url, logger);
+      } catch (e2) {
+        lastReason.push(`${url} 打开失败: ${humanizeNetError(e2)}`);
+        logger?.warn?.(lastReason[lastReason.length - 1]);
+        continue;
+      }
+    }
+    try {
       await closeOverlays(page, logger);
       text = await pageVisibleText(page);
     } catch (e) {
@@ -256,10 +133,13 @@ export async function runGenericWeb(platform, page, logger) {
       continue;
     }
 
-    const login = await detectLoginWall(page, text);
-    if (login.needLogin) {
-      logger?.warn?.(`${login.reason} → 需要重新登录`);
-      return { status: 'needs_login', detail: login.reason, url: page.url() };
+    // 登录墙检查：签名有效时跳过（站点登录后仍可能带着「登录」字样的活动位，别误报）
+    if (sig !== 'valid') {
+      const login = await detectLoginWall(page, text);
+      if (login.needLogin) {
+        logger?.warn?.(`${login.reason} → 需要重新登录`);
+        return { status: 'needs_login', detail: login.reason, url: page.url() };
+      }
     }
 
     // 签到入口藏在顶栏按钮/菜单里的平台（哩布哩布的算力面板等）：
@@ -287,6 +167,10 @@ export async function runGenericWeb(platform, page, logger) {
       if (/验证您是真人|请按住滑块|拖动到最右|人机验证|安全验证/.test(text)) {
         return { status: 'uncertain', detail: '被人机验证拦截，稍后自动重试', url: page.url() };
       }
+      // 签名有效 = 已登录：登录即送平台到此就算到账（每日积分随登录自动发放）
+      if (sig === 'valid') {
+        return { status: 'success', detail: '已到账（登录凭据有效，登录即送）', url: page.url(), meta: { credits: captureCredits(platform, text) } };
+      }
       if (/(^|\n)\s*(登录 \/ 注册|登录\/注册|登录|注册)\s*(\n|$)/.test(text)) {
         return { status: 'needs_login', detail: '登录入口仍在，点「重新登录」授权一次', url: page.url() };
       }
@@ -296,13 +180,13 @@ export async function runGenericWeb(platform, page, logger) {
       // 页面出现平台专属的登录后字样（如吐司页头的「算力」余额）= 已登录且已到账
       const okHit = (platform.loginOkTexts || []).find((k) => k && text.includes(k));
       if (okHit) {
-        return { status: 'success', detail: `已到账（页面出现「${okHit}」，登录即送，无独立签到按钮）`, url: page.url() };
+        return { status: 'success', detail: `已到账（页面出现「${okHit}」，登录即送，无独立签到按钮）`, url: page.url(), meta: { credits: captureCredits(platform, text) } };
       }
       // 兜底正证：登录后的页面不会再有任何「登录/注册」入口文字（吐司实测——
       // 登录态在 localStorage，cookie 判定不适用；已登录页全文找不到「登录」二字，
       // 未登录的页面必然挂着登录入口）。走到这里说明登录墙检测已经通过。
       if (!/(登录|注册)/.test(text)) {
-        return { status: 'success', detail: '已到账（页面上没有「登录/注册」入口，视为已登录；登录即送到账）', url: page.url() };
+        return { status: 'success', detail: '已到账（页面上没有「登录/注册」入口，视为已登录；登录即送到账）', url: page.url(), meta: { credits: captureCredits(platform, text) } };
       }
       return { status: 'needs_login', detail: '未检测到登录态——点「重新登录」授权一次', url: page.url() };
     }
@@ -344,13 +228,20 @@ export async function runGenericWeb(platform, page, logger) {
 }
 
 /** 通用流程的检测模式：只查登录态 + 列出能看到哪些候选按钮，不点击（前置入口会点开，但不点领取） */
-export async function dryRunWeb(platform, page, logger) {
+export async function dryRunWeb(platform, page, logger, ctx) {
   const url = platform.entryUrls[0] || platform.homepage;
   await openAndWait(page, url, logger);
   await closeOverlays(page, logger);
+  // 签名优先：全在=已登录（跳过文案判定），全缺=失效直接报重登；部分缺失/无签名走旧逻辑
+  const sig = ctx ? await sigCheck(platform, ctx).catch(() => 'none') : 'none';
+  if (sig === 'invalid') {
+    return { status: 'needs_login', detail: '检测：登录凭据已失效（登录 cookie 不在了），点「重新登录」授权一次', url: page.url(), candidates: [] };
+  }
   let text = await pageVisibleText(page);
-  const login = await detectLoginWall(page, text);
-  if (login.needLogin) return { status: 'needs_login', detail: login.reason, url: page.url(), candidates: [] };
+  if (sig !== 'valid') {
+    const login = await detectLoginWall(page, text);
+    if (login.needLogin) return { status: 'needs_login', detail: login.reason, url: page.url(), candidates: [] };
+  }
 
   // 检测也要先点开前置入口（哩布哩布的算力面板等），否则永远看不到里面的领取按钮
   if (platform.beforeClickSelectors?.length) {
@@ -377,21 +268,25 @@ export async function dryRunWeb(platform, page, logger) {
     if (/验证您是真人|请按住滑块|拖动到最右|人机验证|安全验证/.test(text)) {
       return { status: 'uncertain', detail: '被人机验证拦截，稍后自动重试', url: page.url(), candidates: [], buttons: allButtons };
     }
+    // 签名有效 = 已登录：登录即送平台到此即算到账
+    if (sig === 'valid') {
+      return { status: 'dry_run', detail: '检测通过：登录凭据有效（登录即送平台，访问即到账）', url: page.url(), candidates: [], buttons: allButtons, meta: { credits: captureCredits(platform, text) } };
+    }
     if (/(^|\n)\s*(登录 \/ 注册|登录\/注册|登录|注册)\s*(\n|$)/.test(text)) {
       return { status: 'needs_login', detail: '登录入口仍在（点「登录」授权一次）', url: page.url(), candidates: [], buttons: allButtons };
     }
     // 探测路径命中（登录后仍停留的页面地址）= 已登录的正证
     if (platform.loginProbePath && page.url().includes(platform.loginProbePath)) {
-      return { status: 'dry_run', detail: '检测通过：已登录（登录即送平台，访问即到账）', url: page.url(), candidates: [], buttons: allButtons };
+      return { status: 'dry_run', detail: '检测通过：已登录（登录即送平台，访问即到账）', url: page.url(), candidates: [], buttons: allButtons, meta: { credits: captureCredits(platform, text) } };
     }
     // 页面出现平台专属的登录后字样（如吐司页头的「算力」余额）= 已登录
     const okHit = (platform.loginOkTexts || []).find((k) => k && text.includes(k));
     if (okHit) {
-      return { status: 'dry_run', detail: `检测通过：页面出现「${okHit}」，已登录且已到账`, url: page.url(), candidates: [], buttons: allButtons };
+      return { status: 'dry_run', detail: `检测通过：页面出现「${okHit}」，已登录且已到账`, url: page.url(), candidates: [], buttons: allButtons, meta: { credits: captureCredits(platform, text) } };
     }
     // 兜底正证：全文没有「登录/注册」字样 = 登录入口已消失 = 已登录（同正式运行的判定）
     if (!/(登录|注册)/.test(text)) {
-      return { status: 'dry_run', detail: '检测通过：页面上没有「登录/注册」入口，视为已登录', url: page.url(), candidates: [], buttons: allButtons };
+      return { status: 'dry_run', detail: '检测通过：页面上没有「登录/注册」入口，视为已登录', url: page.url(), candidates: [], buttons: allButtons, meta: { credits: captureCredits(platform, text) } };
     }
     return { status: 'needs_login', detail: '未检测到登录态——点「登录」在工具里登录一次后再检测', url: page.url(), candidates: [], buttons: allButtons };
   }
@@ -653,9 +548,20 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
       await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => null);
       await sleep(2500);
     } else {
-      page =
-        (platform.pageUrlMatch && pages.find((p) => p.url().includes(platform.pageUrlMatch))) || pages[0];
-      if (!page) return { status: 'error', detail: '没找到可操作的页面' };
+      // 客户端的窗口目标不是跟调试端口一起出现的：主窗口（如 Trae 的 workbench）要再画几秒
+      // 才注册进 CDP，之前连上就连着取页面列表，拿到 0 个就直接报「没找到可操作的页面」
+      // （Trae 实测必现）。这里轮询等目标出现：优先匹配 pageUrlMatch，等不到再退回第一个页面。
+      const pageDeadline = Date.now() + 30_000;
+      while (true) {
+        const ps = browser.contexts().flatMap((c) => c.pages());
+        page = (platform.pageUrlMatch && ps.find((p) => p.url().includes(platform.pageUrlMatch))) || ps[0] || null;
+        if (page || Date.now() >= pageDeadline) break;
+        await sleep(800);
+      }
+      logger?.step?.(`选定页面: ${page ? page.url().slice(0, 80) : '无'}（等待期间发现 ${pages.length} 个）`);
+      if (!page) return { status: 'error', detail: '没找到可操作的页面（等了 30s 客户端里始终没有窗口目标）' };
+      // 刚出现就接管的话界面可能还在加载：留一拍再找菜单/按钮
+      await sleep(2500);
     }
 
     // 3.5) 签到入口藏在账户菜单里的客户端：先点开菜单

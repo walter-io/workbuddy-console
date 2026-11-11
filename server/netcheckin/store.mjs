@@ -45,6 +45,12 @@ const DEFAULT_CONFIG = {
   platforms: {},
   /** 各网页平台最近一次登录成功的时间戳（id -> ms）：重启后登录状态记账不丢 */
   logins: {},
+  /** 登录凭据签名（id -> { url, names, at }）：登录窗口自动学习，只记 cookie 名不存值。
+   *  登录判定统一走签名比对（loginsig.mjs），文案正则只是无签名时的回退 */
+  cookieSigs: {},
+  /** 最近一次报回的积分余额（id -> { credits, at }）：检测/领取顺带抓到就更新，
+   *  状态页在流水没有余额记录时用它兜底显示 */
+  balances: {},
   /** 自定义网页平台（kind: web），字段见 registry.mjs 的 normalizePlatform */
   custom: [],
 };
@@ -59,6 +65,8 @@ export function loadConfig() {
       schedule: { ...DEFAULT_SCHEDULE, ...(raw.schedule || {}) },
       platforms: raw.platforms || {},
       logins: raw.logins || {},
+      cookieSigs: raw.cookieSigs && typeof raw.cookieSigs === 'object' ? raw.cookieSigs : {},
+      balances: raw.balances && typeof raw.balances === 'object' ? raw.balances : {},
       custom: Array.isArray(raw.custom) ? raw.custom : [],
     };
   } catch {
@@ -88,6 +96,8 @@ export function resolvePlatforms(cfg = loadConfig(), { only = [], includeDisable
   for (const def of BUILTIN_PLATFORMS) {
     const merged = normalizePlatform({ ...def, ...(userPlatforms[def.id] || {}) });
     merged.enabled = userPlatforms[def.id]?.enabled ?? def.defaultEnabled;
+    // 登录凭据签名（登录窗口自动学的）：engines/login 的登录判定统一从这里拿
+    merged.cookieSig = cfg.cookieSigs?.[def.id] || null;
     list.push(merged);
   }
 
@@ -97,6 +107,7 @@ export function resolvePlatforms(cfg = loadConfig(), { only = [], includeDisable
     if (!raw.url && !raw.homepage) continue;
     const merged = normalizePlatform({ kind: 'web', ...raw });
     merged.enabled = raw.enabled ?? userPlatforms[raw.id]?.enabled ?? false;
+    merged.cookieSig = cfg.cookieSigs?.[raw.id] || null;
     list.push(merged);
   }
 

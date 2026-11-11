@@ -121,21 +121,9 @@ export const BUILTIN_PLATFORMS = [
     doneKeywords: ['已领取', '明天再来', '已签到'],
     notes: '需要先安装 Qoder 国内版并登录；领取入口在左下角用量面板的礼物图标。额度窗口是每天 10:00 到次日 10:00，错过不补。',
   },
-  {
-    id: 'zhipu',
-    name: '智谱清言',
-    kind: 'web',
-    category: 'chat',
-    engine: 'zhipu-api',
-    defaultEnabled: true,
-    reward: '每天登录就有积分入账',
-    homepage: 'https://chatglm.cn/',
-    loginUrl: 'https://chatglm.cn/',
-    entryUrls: ['https://chatglm.cn/'],
-    keywords: ['签到', '每日登录', '领取'],
-    doneKeywords: ['今日登录积分已到账', '今日已领取'],
-    notes: '直连官方接口完成每日领取，不依赖页面按钮；登录失效时点「登录」重新授权一次即可。',
-  },
+  // 智谱清言（zhipu）：2026-11 移入 MANUAL_PLATFORMS（羊毛情报）。积分是登录自动到账、
+  // 每日刷新的额度，没有值得维护的「代领」动作；zhipu-api 专用引擎与登录判定一并移除。
+  // 用户配置里遗留的 platforms.zhipu / logins.zhipu 会被自动忽略，历史记录仍留在流水里。
   {
     id: 'minimax',
     name: 'MiniMax Code',
@@ -151,147 +139,13 @@ export const BUILTIN_PLATFORMS = [
     doneKeywords: ['今日已签到', '已签到', '明天再来'],
     notes: '从账户菜单进入每日签到，登录一次后即可每天自动领取；积分 30 天内有效。',
   },
-  {
-    id: 'wanxiang',
-    name: '通义万相',
-    kind: 'web',
-    category: 'art',
-    engine: 'web',
-    defaultEnabled: false,
-    reward: '灵感值/天',
-    homepage: 'https://wanxiang.aliyun.com/',
-    loginUrl: 'https://wanxiang.aliyun.com/',
-    entryUrls: ['https://wanxiang.aliyun.com/'],
-    keywords: ['签到', '立即签到', '领取'],
-    doneKeywords: ['今日已签到', '已签到', '已领取'],
-    notes: '产品已并入千问，入口可能随时变化；默认关闭，确认能正常领取后再打开。',
-  },
-  {
-    id: 'coze',
-    name: '扣子',
-    kind: 'web',
-    category: 'chat',
-    engine: 'web',
-    defaultEnabled: false,
-    reward: '60 积分/天（当日有效，登录自动发放）',
-    homepage: 'https://www.coze.cn',
-    visitClaim: true,
-    loginProbePath: '/workspace',
-    loginUrl: 'https://www.coze.cn',
-    entryUrls: ['https://www.coze.cn/workspace', 'https://www.coze.cn'],
-    keywords: ['签到', '领取', '积分中心'],
-    doneKeywords: ['积分'],
-    notes: '积分每天登录自动发放（60 点，当日作废）——打开工作台就算领到。状态显示「今日已领」即正常；若「入口未命中」也无需理会，积分已到账。',
-  },
-  {
-    id: 'jimeng',
-    name: '即梦',
-    kind: 'web',
-    category: 'video',
-    engine: 'web',
-    defaultEnabled: false,
-    reward: '每日登录送积分（20~80 随活动浮动）',
-    homepage: 'https://jimeng.jianying.com',
-    visitClaim: true,
-    loginProbePath: '/create',
-    loginUrl: 'https://jimeng.jianying.com',
-    entryUrls: ['https://jimeng.jianying.com'],
-    keywords: ['签到', '立即签到', '领取'],
-    doneKeywords: ['今日已签到', '已签到', '已领取', '明日再来'],
-    notes: '每日登录送积分，数额随官方活动浮动（20~80 不等）；免费积分一般当日有效，建议当天用掉。',
-  },
-  {
-    id: 'liblib',
-    name: '哩布哩布',
-    kind: 'web',
-    category: 'art',
-    engine: 'web',
-    defaultEnabled: false,
-    reward: '300 算力/天',
-    homepage: 'https://www.liblib.art',
-    loginUrl: 'https://www.liblib.art',
-    entryUrls: ['https://www.liblib.art'],
-    // 每日领取入口不稳定：页头的算力按钮（Topbar_powerBtn）弹出的面板实测只有充值；
-    // 免费算力可能以登录弹窗/活动页形式发放。代领时会自动点开算力面板核对，
-    // 显示「没找到入口」时打开官网核对，若活动页有领取按钮，把按钮文字补进 config 的 keywords。
-    beforeClickSelectors: ['[class*="Topbar_powerBtn"]', '[class*="powerBtn"]'],
-    keywords: ['签到', '领取', '每日领取'],
-    doneKeywords: ['今日已领取', '已领取', '明日再来', '今日已签到'],
-    notes: '免费用户每日登录可领 300 点算力（领取形式随活动变化，可能以登录弹窗或活动页发放）。代领会自动点开页头算力按钮的面板核对；显示「没找到入口」时请打开官网看看活动页，把按钮文字补进 config 的 keywords 即可。',
-  },
-  {
-    id: 'tusiart',
-    name: '吐司',
-    kind: 'web',
-    category: 'art',
-    engine: 'web',
-    defaultEnabled: false,
-    reward: '50~100 算力/天 + 20 次免费生图',
-    homepage: 'https://tusiart.com',
-    loginUrl: 'https://tusiart.com',
-    // 算力是「登录即送」：页头出现「算力」余额字样即视为已到账（没有签到按钮可点）
-    visitClaim: true,
-    loginOkTexts: ['算力'],
-    entryUrls: ['https://tusiart.com'],
-    keywords: ['签到', '领取'],
-    doneKeywords: ['算力'],
-    notes: '每天登录自动送算力（约 50~100）并有 20 次不耗算力的生图次数，打开页面即到账、无签到按钮；历史记录免费版只保留 14 天。',
-  },
-  {
-    id: 'comate',
-    name: '百度 Comate',
-    kind: 'web',
-    category: 'code',
-    engine: 'web',
-    defaultEnabled: false,
-    reward: '注册送 5000 积分，每日签到得积分',
-    homepage: 'https://comate.baidu.com/',
-    loginUrl: 'https://comate.baidu.com/',
-    entryUrls: ['https://comate.baidu.com/'],
-    keywords: ['签到', '领取'],
-    doneKeywords: ['今日已签到', '已签到', '我的积分'],
-    // 网页端没有可靠的代领入口：积分要下载 Comate / 在 IDE 插件里做每日任务。
-    // claimViaApp=true 时，运行结果一旦「入口未命中」，工具会主动提醒而不是让用户翻运行记录。
-    claimViaApp: true,
-    appOnlyNote: '实测网页端通常没有可代领的签到入口——百度的积分需要下载 Comate 客户端 / 在 IDE 插件内完成每日任务才能领取，请以官网活动页为准。',
-    notes: '百度 AI 编程助手：官方定价页确认个人版可通过每日签到获取积分（用于代码补全/生成消耗）。签到入口在网页个人中心，也可能只在 IDE 插件里——显示「入口未命中」时以官网为准。',
-  },
-  {
-    id: 'pixverse',
-    name: 'PixVerse',
-    kind: 'web',
-    engine: 'web',
-    defaultEnabled: false,
-    category: 'video',
-    reward: '30 积分/天（注册另送 60）',
-    homepage: 'https://pixverse.ai/zh',
-    loginUrl: 'https://pixverse.ai/zh',
-    entryUrls: ['https://pixverse.ai/zh'],
-    keywords: ['签到', '领取', '每日积分'],
-    doneKeywords: ['今日已领取', '已领取', '已签到'],
-    notes: '官方信息页确认每日 30 积分（注册另送 60），用于视频生成。到账方式与领取入口需登录后确认——若自动领取显示「入口未命中」，说明积分是登录自动发放或入口在 App 内。',
-  },
-  {
-    id: 'vidu',
-    name: 'Vidu',
-    kind: 'web',
-    category: 'video',
-    engine: 'web',
-    defaultEnabled: false,
-    reward: '80 积分/天（登录即送）',
-    // 站点风控对无头浏览器必弹人机验证——Vidu 的领取必须用可见窗口
-    headed: true,
-    // 每天登录即送积分，没有「签到按钮」可点：确认已登录就算领取完成
-    visitClaim: true,
-    homepage: 'https://www.vidu.cn',
-    visitClaim: true,
-    loginProbePath: '/create',
-    loginUrl: 'https://www.vidu.cn/create/img2video',
-    entryUrls: ['https://www.vidu.cn/create/img2video', 'https://www.vidu.cn'],
-    keywords: ['签到', '领取'],
-    doneKeywords: ['积分'],
-    notes: '每天登录自动送 80 积分（月上限约 800），积分用于文生视频。站点风控对无头浏览器必弹人机验证——领取时会弹出一个可见的浏览器窗口，属正常现象。',
-  },
+  // 扣子（coze）：2026-11 移除。字节已公告企业版停止售卖、专业版停服（2027 年底全面停服），
+  // 平台处于收缩期；个人版「登录送 60 积分、当日作废」价值低，不值得继续维护代领。
+  // 用户配置里遗留的 platforms.coze / logins.coze 会被自动忽略，历史记录仍留在流水里。
+  // 哩布哩布 / 吐司 / PixVerse（拍我AI）/ Vidu：2026-11 移入 MANUAL_PLATFORMS（羊毛情报）。
+  // 四家都是「登录即送」（visitClaim）：奖励打开官网就自动到账，没有可点的领取动作，
+  // 「代领」只是替用户开一次页面，没有价值——与智谱清言同理，无法累计/攒库存的都归羊毛情报。
+  // 用户配置里遗留的 platforms.<id> / logins.<id> 会被自动忽略，历史记录仍留在流水里。
 ];
 
 /** 内置平台的 id 集合（用于区分自定义平台） */
@@ -307,6 +161,11 @@ export function normalizePlatform(p) {
     defaultEnabled: false,
     category: ['chat', 'code', 'video', 'art'].includes(p.category) ? p.category : 'chat',
     headed: Boolean(p.headed),
+    // 'direct' = 强制直连（绕过系统代理）：站点走代理节点反而不通时用（pixverse 实测）
+    proxy: p.proxy === 'direct' ? 'direct' : undefined,
+    // 重登窗口先清掉本平台 profile 的 cookie：token 过期后站点 SPA 仍停在
+    // 「已登录」页面，不清掉用户没法重新扫码（zhipu 实测）
+    reloginClearCookies: Boolean(p.reloginClearCookies),
     visitClaim: Boolean(p.visitClaim),
     // 登录即送类平台：页面出现这些字样即视为已登录（Vidu 的 /create、吐司页头的「算力」等）
     loginOkTexts: Array.isArray(p.loginOkTexts) ? p.loginOkTexts : [],
@@ -320,6 +179,8 @@ export function normalizePlatform(p) {
     entryUrls: Array.isArray(p.entryUrls) && p.entryUrls.length ? p.entryUrls : [p.homepage || p.url].filter(Boolean),
     keywords: Array.isArray(p.keywords) && p.keywords.length ? p.keywords : ['签到', '每日签到', '立即签到', '打卡', '领取'],
     doneKeywords: Array.isArray(p.doneKeywords) ? p.doneKeywords : ['今日已签到', '已签到', '已领取', '明天再来'],
+    // 页面余额正则（可选）：命中后首个捕获组作为积分余额，随每次运行/检测更新到 UI
+    creditsPattern: typeof p.creditsPattern === 'string' && p.creditsPattern ? p.creditsPattern : '',
     doneRule:
       p.doneRule && (Array.isArray(p.doneRule.present) || Array.isArray(p.doneRule.absent))
         ? { present: p.doneRule.present || [], absent: p.doneRule.absent || [] }
@@ -402,12 +263,21 @@ export async function quitClientGracefully(exePath, { waitMs = 15_000 } = {}) {
 }
 ;
 /**
- * 羊毛情报：确认有免费福利、但**无法由控制台代领**的平台。
- * 挂在这里只做展示（告诉用户去哪手动领），不进执行队列。
- * 原因标签 why 要写清楚是哪种「不能」：App 内、客户端非浏览器内核、规则未证实、
- * 无需代领（自动到账）等——用户据此决定要不要自己动手。
+ * 羊毛情报：有免费福利、但**无法或不值得由控制台代领**的平台。
+ * 挂在这里只做展示（告诉用户去哪手动领），不进执行队列。归类标准：
+ * - 代领不了：App 内、客户端非浏览器内核、规则未证实、重登成本高（如百度 Comate）
+ * - 不值得：积分当日作废、数额太小，登录即自动到账没有「代领」动作（即梦/海艺等）
+ * 原因标签 why 要写清楚是哪种，用户据此决定要不要自己动手。
  */
 export const MANUAL_PLATFORMS = [
+  {
+    id: 'wanxiang',
+    name: '通义万相',
+    category: 'art',
+    reward: '灵感值/天（需在通义 App / 千问内做每日任务获取）',
+    why: '2026-11 实测：wanxiang.aliyun.com 已整站重定向到 tongyi.aliyun.com/wan 产品介绍页，网页端没有任何签到/积分入口，无法代领',
+    homepage: 'https://tongyi.aliyun.com/wan/',
+  },
   {
     id: 'yuanbao',
     name: '腾讯元宝',
@@ -441,6 +311,22 @@ export const MANUAL_PLATFORMS = [
     homepage: 'https://hailuoai.com',
   },
   {
+    id: 'pixverse',
+    name: 'PixVerse（拍我AI）',
+    category: 'video',
+    reward: '基础版每日免费 60 积分（登录自动发放）',
+    why: '积分登录自动发放、无需点任何按钮——自己打开网站就有，不需要代领（国内版为 pai.video）',
+    homepage: 'https://pai.video/',
+  },
+  {
+    id: 'vidu',
+    name: 'Vidu',
+    category: 'video',
+    reward: '80 积分/天（登录即送，月上限约 800）',
+    why: '积分每天登录自动到账、没有领取动作——自己打开网站就有，不需要代领',
+    homepage: 'https://www.vidu.cn',
+  },
+  {
     id: 'seaart',
     name: '海艺 AI',
     category: 'art',
@@ -455,6 +341,22 @@ export const MANUAL_PLATFORMS = [
     reward: '每日 20 次免费生成（自动重置，邀请好友可加）',
     why: '额度按天自动重置、无需签到——自己打开网站就有，不需要代领',
     homepage: 'https://3d.hunyuan.tencent.com',
+  },
+  {
+    id: 'liblib',
+    name: '哩布哩布',
+    category: 'art',
+    reward: '每日免费 20 积分（打开官网自动到账）',
+    why: '积分打开官网即自动到账、没有领取按钮——自己打开网站就有，不需要代领',
+    homepage: 'https://www.liblib.art',
+  },
+  {
+    id: 'tusiart',
+    name: '吐司',
+    category: 'art',
+    reward: '50~100 算力/天 + 20 次免费生图（登录自动到账）',
+    why: '算力登录自动到账、无签到按钮——自己打开网站就有，不需要代领',
+    homepage: 'https://tusiart.com',
   },
   {
     id: 'duiyou',
@@ -505,6 +407,14 @@ export const MANUAL_PLATFORMS = [
     homepage: 'https://www.genspark.ai',
   },
   {
+    id: 'zhipu',
+    name: '智谱清言',
+    category: 'chat',
+    reward: '每天登录自动送积分（每日刷新）',
+    why: '积分登录自动到账、每日刷新——自己打开网站就有，不需要代领',
+    homepage: 'https://chatglm.cn/',
+  },
+  {
     id: 'volcark',
     name: '火山方舟',
     category: 'code',
@@ -535,6 +445,22 @@ export const MANUAL_PLATFORMS = [
     reward: '每日自动更新 30 积分（注册另送 100）',
     why: '积分每日自动到账、无需签到——用多少算多少',
     homepage: 'https://www.huiyan.ai',
+  },
+  {
+    id: 'comate',
+    name: '百度 Comate',
+    category: 'code',
+    reward: '注册送 5000 积分 + 每日签到得积分（用于代码补全/生成消耗）',
+    why: '积分要下载 Comate 客户端或在 IDE 插件里完成每日任务，网页端没有可代领的入口（2026-11 实测网页代领恒为「入口未命中」）',
+    homepage: 'https://comate.baidu.com/',
+  },
+  {
+    id: 'jimeng',
+    name: '即梦',
+    category: 'video',
+    reward: '每日登录送 20~80 积分（随官方活动浮动，当日作废）',
+    why: '积分当日作废、价值低，登录官网即自动到账——不值得维护自动代领；想要的话自己打开 jimeng.jianying.com 就有',
+    homepage: 'https://jimeng.jianying.com',
   },
   {
     id: 'tiangong',

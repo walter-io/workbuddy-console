@@ -6,6 +6,7 @@ import {
   IconClock,
   IconCopy,
   IconDownload,
+  IconExternalLink,
   IconLayers,
   IconRefresh,
   IconShield,
@@ -68,7 +69,7 @@ function NetCheckinSettings() {
     <PageSection
       icon={<IconZap />}
       title="全网签到"
-      desc="其他平台（智谱清言、MiniMax、豆包等）的每日福利代领；平台状态与手动领取在「全网签到」页"
+      desc="其他平台（MiniMax、豆包等）的每日福利代领；平台状态与手动领取在「全网签到」页"
     >
       <Card className="p-5 pt-1 pb-1">
         <div className="divide-y divide-zinc-100 -mx-4">
@@ -121,7 +122,6 @@ function NetCheckinSettings() {
 
 export default function SettingsPage() {
   const toast = useToast();
-  const confirm = useConfirm();
 
   /* ---------------- 通用设置 ---------------- */
   const [settings, setSettings] = useState<SettingsInfo | null>(null);
@@ -202,7 +202,7 @@ export default function SettingsPage() {
 
   /** 其余布尔设置项的统一开关：与自动签到同一套「乐观更新 + 失败回滚」交互 */
   const toggleBoolSetting = async (
-    key: 'autoCheckUpdate' | 'unlockAllPlatforms',
+    key: 'autoCheckUpdate' | 'unlockAllPlatforms' | 'allowCrossAccountOps',
     next: boolean,
     hint: { on: string; off: string }
   ) => {
@@ -280,6 +280,34 @@ export default function SettingsPage() {
             上面这些平台按地区或自身策略限制了外部调用。即使 key 能创建成功，从这里接入后也可能出现
             <b>请求被拒、频繁限流，甚至账号被风控或封禁</b>
             。默认收起正是因为「接进去大概率也用不了」；是否接入请自行判断并承担风险，也请先确认你了解该平台的服务条款。
+          </div>
+        </Card>
+      </PageSection>
+
+      {/* 账号与会话：跨账号会话操作的总闸（默认关，开放「转到此账号 / 同时复制会话」） */}
+      <PageSection
+        icon={<IconLayers />}
+        title="账号与会话"
+        desc="跨账号会话操作总闸，默认关闭"
+      >
+        <Card className="p-5">
+          <Row
+            label="跨账号会话操作"
+            desc="开启后，账号页恢复「转到此账号」与切换确认框里的「同时复制会话」。上游风控会识别跨账号会话重放并批量封禁关联账号（2026-10-29 实测连坐封号），默认关闭，开启请自行承担风险"
+          >
+            <Switch
+              checked={!!settings?.allowCrossAccountOps}
+              onChange={(v) =>
+                toggleBoolSetting('allowCrossAccountOps', v, {
+                  on: '已开启跨账号会话操作：账号页的「转到此账号」「同时复制会话」已恢复，请自行承担风控风险',
+                  off: '已关闭跨账号会话操作：相关入口恢复置灰（默认状态）',
+                })
+              }
+              title="开启后，账号页恢复「转到此账号」与「同时复制会话」"
+            />
+          </Row>
+          <div className="mt-1 border-t border-zinc-100 px-4 pt-3 text-xs leading-relaxed text-zinc-400">
+            「一键去重」「全账号会话同步汇总」会向官方接口做跨账号删除/写入，风险更高，不在此开关范围内、维持停用。
           </div>
         </Card>
       </PageSection>

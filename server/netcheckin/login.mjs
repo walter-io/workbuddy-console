@@ -11,7 +11,7 @@
 
 import { lockFor, acquireContext, releaseContext } from './browser.mjs';
 import { pageVisibleText } from './dom.mjs';
-import { zhipuProbe } from './engines.mjs';
+import { snapshotCookieNames, learnSig } from './loginsig.mjs';
 import { loadConfig, saveConfig, resolvePlatforms } from './store.mjs';
 
 /** 登录窗口时限：30 分钟——要给滑块验证、刷新重试、等短信验证码留足时间，
@@ -67,7 +67,6 @@ export function loginState() {
 
 /* 各平台「登录成功」的判定方式：默认看登录表单文案是否消失 */
 const DETECTORS = {
-  zhipu: async (page) => zhipuProbe(page),
   // 百度系（Comate）：登录态就是 BDUSS cookie（百度全域会话）——页面上的
   // 「退出登录」藏在账号悬停菜单里，innerText 抓不到，文字判定对它无效
   comate: async (page, ctx) => {
@@ -82,19 +81,6 @@ const DETECTORS = {
     const loginForm = /获取验证码|微信扫码登录|请输入您的手机号/.test(text);
     const logged = /每日签到|签到得|MiniMax\d+/.test(text);
     return { ok: !loginForm && logged, why: loginForm ? 'login-form' : logged ? 'user-ui' : 'unknown' };
-  },
-  // 哩布哩布：登录后页头会出现「算力」余额字样（未登录时不显示），退出入口
-  // 藏在头像悬停菜单里 innerText 抓不到——再认登录 cookie（实测为 usertoken /
-  // usertoken_online，2026-11-05 从共享档案 Cookies 库确认）。
-  liblib: async (page, ctx) => {
-    const text = await pageVisibleText(page, 6000).catch(() => '');
-    if (/退出登录|退出帐号|注销登录/.test(text)) return { ok: true, why: '发现退出登录入口' };
-    if (/算力/.test(text)) return { ok: true, why: '页头出现算力余额（登录态正证）' };
-    const cookies = await ctx.cookies('https://www.liblib.art').catch(() => []);
-    if (cookies.some((c) => c.value && /usertoken/i.test(c.name))) {
-      return { ok: true, why: '哩布哩布登录 cookie（usertoken）已出现' };
-    }
-    return { ok: false, why: /扫码登录|请输入手机号|获取验证码/.test(text) ? '登录表单仍在' : '未检测到登录态（页头没有算力字样）' };
   },
 };
 
@@ -123,6 +109,40 @@ async function detectDefault(page) {
 function setStage(stage, message = '') {
   state.stage = stage;
   if (message) state.message = message;
+}
+
+/* ---------------- 会话级快照（单例：同一时间只有一个登录窗口） ---------------- */
+let sessionCtx = null;
+let sessionBeforeNames = []; // 登录页加载完（用户输入前）的 cookie 名基线
+let sessionLastNames = []; // 最近一次轮询的快照：关窗瞬间 context 可能已死，拿它兜底
+let sessionEnded = false; // 各种结束路径只收尾一次
+
+/** 收尾学签名：cookie 差集非空 = 窗口确实带来了新凭据 → 落盘签名并返回差集。
+ *  这是登录检测的兜底正证——文案探测漏掉的登录，从这里捞回来 */
+async function settleLogin(platform) {
+  try {
+    const fresh = sessionCtx ? await snapshotCookieNames(sessionCtx, platform).catch(() => []) : [];
+    return await learnSig(platform.id, platform, sessionBeforeNames, fresh.length ? fresh : sessionLastNames);
+  } catch {
+    return null;
+  }
+}
+
+/** 会话收尾（成功/超时/关窗/取消全走这一个口）：先学签名再落状态。
+ *  差集非空说明窗口真的带来了新凭据——无论从哪条路径结束（包括手动关窗和点取消），
+ *  都按登录成功记账，并让签名供之后所有登录判定使用。
+ *  之前手动关窗一律记「未完成登录」，用户登完了工具却不知道（pixverse 实测踩坑）。 */
+async function endLoginSession(platform, stage, message) {
+  if (sessionEnded) return;
+  sessionEnded = true;
+  const sig = await settleLogin(platform).catch(() => null);
+  if (sig && stage !== 'success') {
+    stage = 'success';
+    message = `${platform.name} 检测到新登录凭据，已自动保存并关闭窗口`;
+  }
+  if (stage === 'success') markLoginOk(platform.id);
+  setStage(stage, message);
+  await teardown().catch(() => null);
 }
 
 /** 结束当前会话（成功/超时/取消共用）：关窗 + 释放该平台的 profile 锁 */
@@ -156,33 +176,47 @@ export async function startLogin(platformId) {
   state.finishedAt = null;
   setStage('waiting', '浏览器窗口已打开，等待登录');
 
-  // 整个等待过程放后台跑，调用方不等；ended 保证各种结束路径只收尾一次
-  let ended = false;
-  const end = async (stage, message) => {
-    if (ended) return;
-    ended = true;
-    setStage(stage, message);
-    await teardown().catch(() => null);
-  };
+  // 整个等待过程放后台跑，调用方不等；endLoginSession 保证各种结束路径只收尾一次
+  sessionEnded = false;
+  sessionCtx = null;
+  sessionBeforeNames = [];
+  sessionLastNames = [];
+  const end = (stage, message) => endLoginSession(platform, stage, message);
 
   void (async () => {
     let page = null;
     try {
       if (state.stage === 'cancelled') return; // 取消来得太快：锁已在 cancelLogin 里释放
-      const ctx = await acquireContext(state.id, { headless: false });
+      const ctx = await acquireContext(state.id, { headless: false, proxy: platform.proxy });
       if (state.stage === 'cancelled') {
         await releaseContext(state.id).catch(() => null);
         lockFor(state.id).release();
         return;
       }
-      // 用户手动关掉登录窗口 = 放弃本次登录：立即如实结束，
-      // 不再挂到超时、更不能给出「凭据已保存」的误导提示（凭据是否已存取决于是否真的登录过）
+      sessionCtx = ctx;
+      // 重登窗口需要新鲜凭据的平台（配置了 reloginClearCookies 的）：先清掉本 profile 的
+      // cookie——token 过期后站点 SPA 可能仍停在「已登录」页面，不清掉用户没法重新扫码。
+      // profile 按平台隔离，清的只是本平台自己的 cookie，不影响别的平台
+      if (platform.reloginClearCookies) {
+        await ctx.clearCookies().catch(() => null);
+        setStage('waiting', '已清掉过期的旧凭据，正在打开登录页…');
+      }
+      // 用户手动关掉登录窗口：endLoginSession 会先比对 cookie 差集，真的带来了
+      // 新凭据就按成功收尾，没有才如实记放弃
       ctx.on('close', () => {
-        if (!ended && state.stage !== 'cancelled') end('cancelled', '登录窗口已手动关闭，本次未完成登录');
+        if (!sessionEnded && state.stage !== 'cancelled') end('cancelled', '登录窗口已手动关闭，本次未完成登录');
       });
       page = await ctx.newPage();
       await page.goto(platform.loginUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
       await page.waitForTimeout(2500);
+      if (platform.reloginClearCookies) {
+        // cookie 清了但 SPA 会话还可能挂在 localStorage/sessionStorage（实测案例：
+        // 清完 cookie 页面仍停在 /main/「已登录」）——把本页存储一并清掉再刷新，
+        // 站点才会真正回到登录页让用户扫码
+        await page.evaluate(() => { try { localStorage.clear(); sessionStorage.clear(); } catch { /* 忽略 */ } }).catch(() => null);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
+        await page.waitForTimeout(2500);
+      }
       await page.bringToFront().catch(() => null);
 
       // 页面本身还停在登录墙/未登录首页时才替用户点开登录入口；
@@ -203,16 +237,38 @@ export async function startLogin(platformId) {
         }
       }
 
-      const detect = DETECTORS[platform.id] || detectDefault;
+      // 基线快照：登录页加载完（站点此时可能已发 csrf/统计 cookie），用户输入前的状态。
+      // 之后出现的 cookie 才是「这次登录带来的」
+      sessionBeforeNames = await snapshotCookieNames(ctx, platform).catch(() => []);
+      sessionLastNames = sessionBeforeNames;
+
+      /** 登录成功判定：cookie 差集是硬证据（新增了凭据 + 页面不在登录表单上），
+       *  平台专属探测与通用文案判定作辅助——它们对慢渲染/悬停菜单都不可靠 */
+      const hasNewCookies = async () => {
+        const now = await snapshotCookieNames(ctx, platform).catch(() => []);
+        if (now.length) sessionLastNames = now;
+        return now.some((n) => !sessionBeforeNames.includes(n));
+      };
+      const detect = async (page2, ctx2) => {
+        if (await hasNewCookies()) {
+          const t = await pageVisibleText(page2, 4000).catch(() => '');
+          if (!/扫码登录|短信验证码|验证码登录|请输入手机号|请先登录|获取验证码/.test(t)) {
+            return { ok: true, why: '检测到新登录凭据（cookie 差集）' };
+          }
+        }
+        const custom = DETECTORS[platform.id];
+        if (custom) return custom(page2, ctx2).catch(() => ({ ok: false, why: 'err' }));
+        return detectDefault(page2);
+      };
+
       const deadline = Date.now() + MAX_MINUTES * 60_000;
       let lastWhy = '';
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, POLL_MS));
-        if (ended || state.stage === 'cancelled') return; // 用户取消/关窗时 teardown 已做过
+        if (sessionEnded || state.stage === 'cancelled') return; // 用户取消/关窗时 teardown 已做过
         const r = await detect(page, ctx).catch(() => ({ ok: false, why: 'err' }));
         if (r.ok) {
           await new Promise((resolve) => setTimeout(resolve, 1500)); // 让 cookie 落地
-          markLoginOk(state.id);
           await end('success', `${platform.name} 登录完成，凭据已存进本机`);
           return;
         }
@@ -231,10 +287,11 @@ export async function startLogin(platformId) {
   return { ok: true, id: platform.id, name: platform.name };
 }
 
-/** 用户主动放弃：关窗 + 释放锁 */
+/** 用户主动放弃：关窗 + 释放锁。
+ *  取消前同样走统一收口学签名——探测漏网但用户确实登录完成了的情况，从这里捞回来按成功记账 */
 export async function cancelLogin() {
   if (state.stage !== 'waiting') return { ok: true };
-  setStage('cancelled', '已取消');
-  await teardown().catch(() => null);
+  const platform = resolvePlatforms().find((p) => p.id === state.id);
+  await endLoginSession(platform, 'cancelled', '已取消');
   return { ok: true };
 }

@@ -4,7 +4,7 @@
  * 数据来自 /api/netcheckin/platform/:id（记录）+ 总览页轮询的共享 state（实时状态）。
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -31,6 +31,7 @@ import {
   type NetState,
   type ResultRow,
   CATEGORY_META,
+  RECORDS_PAGE_SIZE,
   STATUS_LABEL,
   avatarCls,
   matrixDotCls,
@@ -49,6 +50,9 @@ export default function NetPlatformDetail({
   state,
   trial,
   login,
+  toggling = false,
+  pendingEnabled,
+  pendingActive = false,
   onBack,
   showBack = true,
   onRefresh,
@@ -62,13 +66,20 @@ export default function NetPlatformDetail({
   state: NetState | null;
   trial?: { status: string; detail: string };
   login: LoginStatus | null;
+  /** 开关保存中（父层记帐）：期间禁用开关，点了马上有「在处理」的观感，也不会连点打架 */
+  toggling?: boolean;
+  /** 乐观目标值：保存期间用它显示目标状态，详情接口/轮询的旧数据打不回去 */
+  pendingEnabled?: boolean;
+  /** 父层本地置忙（点击后到服务端 activeIds 接管前）：合并进行级「执行中」判定 */
+  pendingActive?: boolean;
   onBack: () => void;
   /** 页签视图下顶栏已有页签条，返回按钮冗余；列表/深链场景显示 */
   showBack?: boolean;
   /** 页签视图下非当前页签虽然挂载但不可见：暂停轮询，省掉十几个页签的空转请求 */
   visible?: boolean;
   onRefresh: () => void;
-  onRun: (id: string, opts?: { dryRun?: boolean }) => void;
+  /** 返回 { started }：POST 是异步启动，false = 没跑起来（平台忙/批量中），按钮立即复位 */
+  onRun: (id: string, opts?: { dryRun?: boolean }) => Promise<{ started: boolean }>;
   onToggle: (id: string, enabled: boolean) => void;
   onLogin: (id: string) => void;
   onCancelLogin: () => void;
@@ -76,6 +87,13 @@ export default function NetPlatformDetail({
   const toast = useToast();
   const [detail, setDetail] = useState<DetailData | null>(null);
   const [loadErr, setLoadErr] = useState('');
+  // 检测与领取各自记 loading，两个按钮不互相转圈
+  // （hooks 必须在任何条件 return 之前调用，否则「加载中 → 加载完成」那一次渲染
+  //  hook 数量对不上，React 直接把整棵组件树炸掉）
+  const [runBusy, setRunBusy] = useState(false);
+  const [trialBusy, setTrialBusy] = useState(false);
+  // 领取记录分页：详情接口最多回 200 条，一页 20 条翻着看
+  const [recordPage, setRecordPage] = useState(1);
 
   const load = useCallback(async () => {
     try {
@@ -93,14 +111,38 @@ export default function NetPlatformDetail({
 
   // 该平台执行中或登录窗口开着时 3 秒轮询记录，否则 30 秒兜底；
   // 页签不可见（保持挂载但被隐藏）时不轮询——切回时 useEffect 依赖变化自动恢复
-  const active = state?.activeIds?.includes(id) || login?.stage === 'waiting';
+  // rowActiveRaw 把父层的本地置忙（pendingActive）也算进去：点击瞬间就亮，不等轮询
+  const rowActiveRaw = state?.activeIds?.includes(id) || pendingActive;
+  const active = rowActiveRaw || login?.stage === 'waiting';
   useEffect(() => {
     if (!visible) return;
     const t = setInterval(load, active ? 3_000 : 30_000);
     return () => clearInterval(t);
   }, [load, active, visible]);
 
-  const p = detail?.platform || state?.platforms.find((x) => x.id === id) || null;
+  // 本地转圈（runBusy/trialBusy）的收尾：POST 异步启动、毫秒级返回，不能在 run() 的
+  // finally 里复位——否则按钮只转一下就停，后面几十秒的浏览器执行毫无反馈。
+  // 规则：rowActive 亮起后，true→false 的那一次（本轮结束）才复位
+  const prevActiveRef = useRef(false);
+  useEffect(() => {
+    if (rowActiveRaw) {
+      prevActiveRef.current = true;
+      return;
+    }
+    if (prevActiveRef.current) {
+      prevActiveRef.current = false;
+      setRunBusy(false);
+      setTrialBusy(false);
+    }
+  }, [rowActiveRaw]);
+
+  // 开关/领取按钮认「共享 state 里的 enabled」而不是详情接口那份：
+  // 详情是挂载时+30s 兜底轮询拉的，切完开关后要等下一轮才更新——期间开关会
+  // 弹回旧位置，看起来就像「开关没用」。共享 state 在保存成功后立刻刷新；
+  // 保存中再认乐观目标值（pendingEnabled），点击立即翻到目标状态。
+  const found: NetPlatform | null = detail?.platform || state?.platforms.find((x) => x.id === id) || null;
+  const liveEnabled = pendingEnabled ?? state?.platforms.find((x) => x.id === id)?.enabled ?? found?.enabled ?? false;
+  const p: NetPlatform | null = found ? { ...found, enabled: liveEnabled } : null;
 
   if (loadErr && !p) {
     return (
@@ -127,21 +169,23 @@ export default function NetPlatformDetail({
   }
 
   const st = p.lastStatus ? STATUS_LABEL[p.lastStatus] || p.lastStatus : null;
-  const rowActive = state?.activeIds?.includes(p.id) || false;
+  const rowActive = rowActiveRaw;
   // 需要登录按钮的情况：登录失效、检测发现失效，或从没登录过
   const needLogin = p.enabled && (p.lastStatus === 'needs_login' || trial?.status === 'needs_login' || (!p.lastLoginAt && !p.lastTs));
   const loginActive = login?.stage === 'waiting' && login.id === p.id;
-
-  // 检测与领取各自记 loading，两个按钮不互相转圈
-  const [runBusy, setRunBusy] = useState(false);
-  const [trialBusy, setTrialBusy] = useState(false);
 
   const run = async (opts?: { dryRun?: boolean }) => {
     if (opts?.dryRun) setTrialBusy(true);
     else setRunBusy(true);
     try {
-      await onRun(p.id, opts);
-    } finally {
+      const r = await onRun(p.id, opts);
+      // 没跑起来（平台忙/批量中，startRun 已 toast 原因）立即复位；
+      // 跑起来了保持转圈，交给上面的 rowActive true→false effect 收尾
+      if (!r?.started) {
+        setTrialBusy(false);
+        setRunBusy(false);
+      }
+    } catch {
       setTrialBusy(false);
       setRunBusy(false);
     }
@@ -150,6 +194,12 @@ export default function NetPlatformDetail({
   // 14 天矩阵（子页面数据可能比共享 state 新，优先用 detail 里的）
   const matrix = detail?.platform.matrix || p.matrix || {};
   const days = Object.keys(matrix);
+
+  // 领取记录分页：接口最多回 200 条，整表平铺会把页面拉出几米长
+  const records = detail?.records || [];
+  const recordPageCount = Math.max(1, Math.ceil(records.length / RECORDS_PAGE_SIZE));
+  const safeRecordPage = Math.min(recordPage, recordPageCount);
+  const recordRows = records.slice((safeRecordPage - 1) * RECORDS_PAGE_SIZE, safeRecordPage * RECORDS_PAGE_SIZE);
 
   return (
     <div className="space-y-8">
@@ -190,7 +240,7 @@ export default function NetPlatformDetail({
               {p.kind === 'client' ? '下载页' : '官网'}
             </a>
           )}
-          <Switch checked={p.enabled} onChange={(v) => onToggle(p.id, v)} title="开启后参与自动领取与一键执行" />
+          <Switch checked={p.enabled} disabled={toggling} onChange={(v) => onToggle(p.id, v)} title="开启后参与自动领取与一键执行" />
           {/* 登录按钮只在需要时出现：首次登录、登录失效或检测发现失效；登录成功后立即消失 */}
           {p.kind === 'web' && (needLogin || loginActive) && (
             <Button
@@ -209,7 +259,7 @@ export default function NetPlatformDetail({
             disabled={rowActive || trialBusy || p.kind === 'client'}
             loading={trialBusy}
             onClick={() => run({ dryRun: true })}
-            title={p.kind === 'client' ? '桌面版平台的检测需要重启客户端接管，不做只读检测——直接用「领取」即可' : '只核对入口与登录态，不点击、不领取'}
+            title={p.kind === 'client' ? '桌面版平台的检测需要重启客户端接管，不做只读检测——直接用「领取」即可' : '只核对入口与登录态，不点击、不领取；顺带把页面上能看到的积分余额刷新进来'}
           >
             检测
           </Button>
@@ -249,7 +299,11 @@ export default function NetPlatformDetail({
         <StatCard
           label="已知积分余额"
           value={p.credits != null ? p.credits.toLocaleString('zh-CN') : '—'}
-          sub={p.credits != null ? '平台最近一次报回的余额' : '该平台没有提供余额查询，暂无法显示'}
+          sub={
+            p.credits != null
+              ? `${fmtRelative(p.balanceAt || p.lastTs)}更新 · 点「检测」可刷新`
+              : '该平台没有提供余额显示，暂无法抓取'
+          }
           tone="violet"
           icon={<IconCoins />}
         />
@@ -314,18 +368,21 @@ export default function NetPlatformDetail({
         </Card>
       </PageSection>
 
-      {/* 14 天签到矩阵 */}
+      {/* 14 天签到矩阵：色块按 flex-1 撑满整行，日期标在各自色块下方 */}
       <PageSection icon={<IconRefresh />} title="近 14 天领取情况" desc="青绿=已领 · 琥珀=受阻 · 玫红=失败 · 灰=未执行">
         <Card className="p-4">
-          <div className="flex flex-wrap gap-2.5">
-            {days.map((d) => (
-              <div key={d} className="flex flex-col items-center gap-1.5" title={`${d}：${matrix[d] ? STATUS_LABEL[matrix[d]] || matrix[d] : '未执行'}`}>
-                <span className={`inline-block h-4 w-4 rounded-md ${matrixDotCls(matrix[d])}`} />
-                <span className="text-[10px] text-zinc-400 tabular-nums">{d.slice(5)}</span>
-              </div>
-            ))}
-            {!days.length && <span className="text-sm text-zinc-400">还没有数据</span>}
-          </div>
+          {days.length ? (
+            <div className="flex gap-1.5">
+              {days.map((d) => (
+                <div key={d} className="flex-1 min-w-0 flex flex-col items-center gap-1.5" title={`${d}：${matrix[d] ? STATUS_LABEL[matrix[d]] || matrix[d] : '未执行'}`}>
+                  <span className={`inline-block h-4 w-full rounded-md ${matrixDotCls(matrix[d])}`} />
+                  <span className="text-[10px] text-zinc-400 tabular-nums">{d.slice(5)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <span className="text-sm text-zinc-400">还没有数据</span>
+          )}
         </Card>
       </PageSection>
 
@@ -347,16 +404,16 @@ export default function NetPlatformDetail({
             <table className="w-full text-sm min-w-[640px]">
               <thead>
                 <tr className="text-xs text-zinc-400 text-left border-b border-zinc-100">
-                  <th className="py-2.5 px-4 font-medium w-24">状态</th>
+                  <th className="py-2.5 px-4 font-medium w-28">状态</th>
                   <th className="py-2.5 font-medium w-32">积分变动</th>
                   <th className="py-2.5 font-medium">说明</th>
                   <th className="py-2.5 px-4 font-medium w-44 text-right">时间</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-50">
-                {(detail?.records || []).map((r, i) => (
+                {recordRows.map((r, i) => (
                   <tr key={`${r.ts}-${i}`} className="hover:bg-zinc-50/60 transition-colors">
-                    <td className="py-2.5 px-4">
+                    <td className="py-2.5 px-4 whitespace-nowrap">
                       <span className="inline-flex items-center gap-1.5">
                         <span className={`inline-block h-1.5 w-1.5 rounded-full ${statusDotCls(r.status)}`} />
                         <span className={`text-xs font-medium ${statusTextCls(r.status)}`}>{STATUS_LABEL[r.status] || r.status}</span>
@@ -388,6 +445,28 @@ export default function NetPlatformDetail({
               </tbody>
             </table>
           </div>
+          {/* 分页页脚：与总览/免费模型页同一套翻页交互 */}
+          {records.length > 0 && (
+            <div className="flex flex-wrap items-center gap-3 px-4 py-2.5 border-t border-zinc-100 text-xs text-zinc-500">
+              <span className="tabular-nums">
+                第 <b className="font-mono text-zinc-700">{safeRecordPage}</b> / {recordPageCount} 页 · 共 {records.length} 条 · 本页 {recordRows.length} 条
+              </span>
+              <div className="ml-auto flex items-center gap-1.5">
+                <Button size="sm" variant="subtle" disabled={safeRecordPage <= 1} onClick={() => setRecordPage(1)}>
+                  首页
+                </Button>
+                <Button size="sm" variant="subtle" disabled={safeRecordPage <= 1} onClick={() => setRecordPage(safeRecordPage - 1)}>
+                  上一页
+                </Button>
+                <Button size="sm" variant="subtle" disabled={safeRecordPage >= recordPageCount} onClick={() => setRecordPage(safeRecordPage + 1)}>
+                  下一页
+                </Button>
+                <Button size="sm" variant="subtle" disabled={safeRecordPage >= recordPageCount} onClick={() => setRecordPage(recordPageCount)}>
+                  末页
+                </Button>
+              </div>
+            </div>
+          )}
         </Card>
       </PageSection>
     </div>

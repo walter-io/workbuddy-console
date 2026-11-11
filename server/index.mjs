@@ -1,6 +1,7 @@
 import express from 'express';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -80,7 +81,7 @@ import {
 } from './proxy/index.mjs';
 import { pickTestModel } from './proxy/index.mjs';
 import { stopWorkbuddy, launchWorkbuddy } from './targets/workbuddy.mjs';
-import { listSessionsForSwitch, copySessions, moveSessionsToAccount, sessionIdsNeedingSync, syncAllAccounts, dedupeSessions, sessionDataRoot, copyVariantIntoAccount, currentUidOfVariant, warmSessionSignatures } from './workbuddy/sessions.mjs';
+import { listSessionsForSwitch, copySessions, moveSessionsToAccount, syncAllAccounts, dedupeSessions, sessionDataRoot, copyVariantIntoAccount, currentUidOfVariant, warmSessionSignatures } from './workbuddy/sessions.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -882,6 +883,8 @@ app.get('/api/accounts', (req, res) => {
   // 让小白不用翻日志就知道"这个号还能不能用"
   const restrictions = restrictionMap();
   res.json({
+    // 跨账号会话操作（转到此账号 / 同时复制会话）的总闸状态：前端据此置灰/放行入口
+    crossAccountOps: crossAccountOpsOn(),
     accounts: accounts.map((a) => ({
       ...accountMeta(a),
       verify: verified[a.id] || null,
@@ -906,7 +909,9 @@ app.get('/api/accounts', (req, res) => {
  * - `stopApp`：切换前**直接结束 WorkBuddy 的全部相关进程**（用户不必手动退出）。
  *   运行中的实例会把登录态改写回原账号，所以不关掉的话切换本来就无效；
  *   关进程后还会**重新打开** WorkBuddy，让用户拿到一个已登录新账号的客户端。
- * - `copySessionIds`：切换前把**当前登录账号**的这些会话复制给目标账号。
+ * - `copySessionIds`：切换前把**当前登录账号**的这些会话转移给目标账号（显式勾选才传）。
+ *   **不传或为空数组 = 零会话操作**：纯写登录态 + 重启，不搬家、不补同步（2026-11-09 改掉
+ *   「没勾选也整包搬家/autoSync 重放」的旧行为——不符合界面承诺，也是连坐封号的根因之一）。
  *   顺序不能反——来源账号是「当前登录账号」，登录态一旦被改写就再也读不出源账号是谁。
  */
 app.post(
@@ -1020,37 +1025,30 @@ app.post(
         }
       }
 
-      /**
-       * 1.5) 自动增量同步：把「此前复制过、目标账号里副本仍存在」的会话自动并入本次切换，
-       *      与用户手动勾选的会话**合并**（不是二选一——2026-10-21 用户实测：手动勾了 4 个，
-       *      其余 38 个已复制会话全被跳过，改名与内容都没跟过去）。只补已有副本，绝不产生新会话。
-       *
-       *      ⚠️ 风控总闸（CROSS_ACCOUNT_SESSION_OPS=false，2026-10-29 实测连坐封号）：
-       *      总闸关闭时跳过 autoSync **并忽略 copySessionIds**——此前只闸了独立入口，
-       *      切号这条最高频的路仍在自动重放历史复制过的会话（用户"没勾选也封号"即此：
-       *      autoSync 默认开，账本里 38 个旧副本每次切号都重放）。
-       */
-      if (CROSS_ACCOUNT_SESSION_OPS && req.body?.autoSync !== false) {
-        try {
-          for (const sid of await sessionIdsNeedingSync({ targetAccountId: id })) {
-            if (!ids.includes(sid)) ids.push(sid);
-          }
-        } catch {
-          /* 源目标相同、档位不支持等：安静跳过，按「无会话需同步」处理 */
-        }
-      } else if (!CROSS_ACCOUNT_SESSION_OPS && ids.length) {
-        console.log(`[switch] 风控总闸关闭：忽略 ${ids.length} 个 copySessionIds（跨账号会话重放已停用）`);
-        ids.length = 0;
-      }
+    /**
+     * 1.5) 会话操作**只跟显式勾选走**（2026-11-09 用户反馈后改掉）：
+     *      - 之前这里有个 autoSync：把账本里「此前复制过」的会话自动并入每次切号——
+     *        用户没勾选也在静默重放（2026-10-29 连坐封号的根因之一），已移除；
+     *      - 之前 copySessionIds 为空时还会「整包搬家」（把当前账号全部会话过户给目标），
+     *        同样是没勾选也在动会话，与界面承诺（勾选框文案「**也**带给这个账号」）相悖。
+     *      现在的规则：copySessionIds 非空才做会话转移，否则本轮**零会话写入**——
+     *      会话按 user_id 存在同一本地库，不搬家也不会丢：切回原账号时各自的会话都在。
+     */
+    if (ids.length && crossAccountOpsOn()) {
+      console.log(`[switch] 显式勾选了 ${ids.length} 个会话，随本次切换转移`);
+    } else if (ids.length) {
+      console.log(`[switch] 风控总闸关闭：忽略 ${ids.length} 个 copySessionIds（跨账号会话重放已停用）`);
+      ids.length = 0;
+    }
 
-      // 2) 搬家：勾了「同时复制会话」就只搬勾选的（含此前已同步过的），没勾才整包搬。
-      //    总闸关闭时整个跳过：切号退化为纯「写登录态 + 重启」，零跨账号会话写入
+      // 2) 搬家：**只在显式勾选了会话时**做（ids 非空；勾选框走会话选择列表逐个挑）。
+      //    没勾选就是纯「写登录态 + 重启」，零跨账号会话写入
       let sessionCopy = null;
-      if (CROSS_ACCOUNT_SESSION_OPS) {
+      if (ids.length && crossAccountOpsOn()) {
         try {
           sessionCopy = await moveSessionsToAccount({
             targetAccountId: id,
-            ids: ids.length ? ids : null,
+            ids,
             sourceVariant: ['cn', 'ai'].includes(String(req.body?.sourceVariant)) ? String(req.body.sourceVariant) : null,
           });
         } catch (err) {
@@ -1165,23 +1163,39 @@ app.patch(
  * 只读：不写任何文件、不改数据库；供账号页的会话选择弹窗渲染。
  */
 /**
- * 跨账号会话操作总闸（2026-10-29）。
+ * 跨账号会话操作总闸（2026-10-29 引入硬停用；2026-11-08 改为设置页开关，默认关闭）。
  *
  * 用户实测：把会话复制/转移到其他账号后，同机的关联账号被上游风控批量封禁——
  * 风控已能识别「跨账号会话重放 + 同机多账号关联」，封的是一组而不是一个。
- * 受影响端点：copy / move / sync-all / dedupe（全部置灰，返回 403 + 原因）。
  *
- * 恢复方式：设环境变量 WB_ALLOW_CROSS_ACCOUNT=1，或把下面的 false 改回 true。
- * 前端对应开关在 src/lib/riskGates.ts，恢复时两端一起改。
+ * 开关在设置页「跨账号会话操作」（settings.allowCrossAccountOps，随 config.json 落盘），
+ * 环境变量 WB_ALLOW_CROSS_ACCOUNT=1 仍可强制打开（等价于开关常开）。
+ * 只放行 转到此账号 / 复制会话 / 切换内会话转移；一键去重 / 全账号同步汇总
+ * 会向官方接口做跨账号删除/写入，风险更高，维持硬停用（gateSyncDedupe）。
  */
-const CROSS_ACCOUNT_SESSION_OPS = process.env.WB_ALLOW_CROSS_ACCOUNT === '1';
+function crossAccountOpsOn() {
+  try {
+    if (loadConfig().settings?.allowCrossAccountOps === true) return true;
+  } catch {
+    /* 读不到配置按关闭处理 */
+  }
+  return process.env.WB_ALLOW_CROSS_ACCOUNT === '1';
+}
 
 function gateCrossAccount(res) {
-  if (CROSS_ACCOUNT_SESSION_OPS) return false;
+  if (crossAccountOpsOn()) return false;
   res.status(403).json({
     error:
-      '跨账号会话操作已临时停用：上游风控会识别跨账号会话重放并批量封禁关联账号（2026-10-29 用户实测）。' +
-      '如确需使用，请阅读相关风险说明后设环境变量 WB_ALLOW_CROSS_ACCOUNT=1 重启服务。',
+      '跨账号会话操作默认关闭：上游风控会识别跨账号会话重放并批量封禁关联账号（2026-10-29 用户实测）。' +
+      '如确需使用，请在「设置 → 账号与会话」开启「跨账号会话操作」并自行承担风险。',
+  });
+  return true;
+}
+
+/** 「一键去重 / 全账号会话同步汇总」的硬闸：不提供开关，始终 403 */
+function gateSyncDedupe(res) {
+  res.status(403).json({
+    error: '「一键去重 / 全账号会话同步汇总」维持停用：会向官方接口做跨账号删除/写入，风险高于复制/转移（2026-10-29 实测连坐封号）。',
   });
   return true;
 }
@@ -1294,7 +1308,7 @@ app.get(
 app.post(
   '/api/sessions/sync-all',
   wrap(async (req, res) => {
-    if (gateCrossAccount(res)) return;
+    if (gateSyncDedupe(res)) return;
     const dryRun = req.body?.dryRun === true;
     const fillMissing = req.body?.fillMissing === true;
     const pruneOthers = req.body?.pruneOthers === true;
@@ -1364,7 +1378,7 @@ app.post(
 app.post(
   '/api/sessions/dedupe',
   wrap(async (req, res) => {
-    if (gateCrossAccount(res)) return;
+    if (gateSyncDedupe(res)) return;
     const dryRun = req.body?.dryRun === true;
     // 冻结方案已废除（冻结会把宿主进程一起冻住，用户系统卡死）。
     // 现在只做门禁：WorkBuddy 在运行就拒绝并提示用户手动退出（托盘右键退出）。
@@ -1525,6 +1539,7 @@ app.get(
       autoRefreshToken: !!cfg.settings.autoRefreshToken,
       autoCheckUpdate: !!cfg.settings.autoCheckUpdate,
       unlockAllPlatforms: !!cfg.settings.unlockAllPlatforms,
+      allowCrossAccountOps: !!cfg.settings.allowCrossAccountOps,
       effectiveProxy: await getProxyUrl(),
       detected: detectWorkbuddyDir(),
       cacheDir: cachePath(''),
@@ -1561,6 +1576,9 @@ app.put(
     if (typeof req.body?.unlockAllPlatforms === 'boolean') {
       cfg.settings.unlockAllPlatforms = req.body.unlockAllPlatforms;
     }
+    if (typeof req.body?.allowCrossAccountOps === 'boolean') {
+      cfg.settings.allowCrossAccountOps = req.body.allowCrossAccountOps;
+    }
     // 设置页每次切换开关都会走这里：必须异步落盘，否则写盘卡顿期间整个界面都超时
     const saveMs = await saveConfigAsync(cfg);
     if (saveMs > 2000) console.log(`[settings] 保存设置耗时 ${saveMs}ms`);
@@ -1575,6 +1593,7 @@ app.put(
       autoRefreshToken: !!cfg.settings.autoRefreshToken,
       autoCheckUpdate: !!cfg.settings.autoCheckUpdate,
       unlockAllPlatforms: !!cfg.settings.unlockAllPlatforms,
+      allowCrossAccountOps: !!cfg.settings.allowCrossAccountOps,
       effectiveProxy: await getProxyUrl(),
       detected: detectWorkbuddyDir(),
     });
@@ -1849,14 +1868,17 @@ import { startNetCheckinScheduler, nextWindowAt } from './netcheckin/scheduler.m
 
 /** 状态接口：平台清单 + 最近结果 + 14 天矩阵 + 定时设置。
  *  缓存失效看两处：60 秒自然过期，或 runEpoch 变了（一轮跑完状态必然变了）。
- *  客户端进程扫描有开销（每个客户端一次 tasklist），所以不能每次都现扫。 */
+ *  客户端进程扫描有开销（每个客户端一次 tasklist），所以不能每次都现扫。
+ *  rev 随开关/定时等写操作自增：必须在**构建缓存时**盖进数据（响应时刻盖的话，
+ *  开关保存前发出、保存后返回的旧状态请求会被盖上新 rev，前端守卫形同虚设——实测闪回）。 */
+let netStateRev = 1;
 let netStateCache = { at: 0, epoch: -1, data: null };
 async function netCheckinState() {
   if (!netStateCache.data || netStateCache.epoch !== runEpoch.value || Date.now() - netStateCache.at > 60_000) {
     const state = buildNetCheckinState();
     await fillClientRunning(state.platforms).catch(() => {});
     state.nextWindowAt = nextWindowAt();
-    netStateCache = { at: Date.now(), epoch: runEpoch.value, data: state };
+    netStateCache = { at: Date.now(), epoch: runEpoch.value, data: state, rev: netStateRev };
   }
   return netStateCache.data;
 }
@@ -1865,7 +1887,7 @@ app.get(
   '/api/netcheckin/state',
   wrap(async (req, res) => {
     const state = await netCheckinState();
-    res.json(state);
+    res.json({ ...state, rev: netStateCache.rev });
   })
 );
 
@@ -1905,7 +1927,8 @@ app.post(
     cfg.platforms = { ...(cfg.platforms || {}), [id]: { ...(cfg.platforms?.[id] || {}), enabled } };
     await saveNetCheckinConfig(cfg);
     netStateCache = { at: 0, epoch: -1, data: null };
-    res.json({ ok: true });
+    netStateRev++;
+    res.json({ ok: true, rev: netStateRev });
   })
 );
 
@@ -1925,6 +1948,7 @@ app.post(
     };
     await saveNetCheckinConfig(cfg);
     netStateCache = { at: 0, epoch: -1, data: null };
+    netStateRev++;
     res.json({ ok: true, schedule: cfg.schedule });
   })
 );
@@ -1971,9 +1995,66 @@ startNetCheckinScheduler();
 // 必须挂在静态资源与 SPA 兜底之前，否则 /v1/* 会被 index.html 吃掉
 registerProxyRoutes(app, { port: PORT });
 
+/* ---------------- 账号包导出/导入（跨机迁移账号） ---------------- */
+
+import { exportAccountPack, importAccountPack } from './workbuddy/accountPack.mjs';
+
+/** 导出账号包：服务端打包好，直接以附件下载（tar.gz） */
+app.get(
+  '/api/workbuddy/account-pack/export',
+  wrap(async (req, res) => {
+    const includeConfig = req.query.config !== '0';
+    const r = await exportAccountPack({ includeConfig });
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(path.basename(r.file))}"`);
+    res.setHeader('X-Pack-Accounts', String(r.count));
+    const stream = fs.createReadStream(r.file);
+    stream.on('error', () => res.destroy());
+    stream.pipe(res);
+    // 下载完成后清理临时包（延迟一点，避免 pipe 未完成就删）
+    stream.on('close', () => fs.rmSync(r.file, { force: true }));
+  })
+);
+
+/** 导入账号包：前端直接 PUT 包文件二进制（包体很小，~几十 KB） */
+app.put(
+  '/api/workbuddy/account-pack/import',
+  express.raw({ type: () => true, limit: '20mb' }),
+  wrap(async (req, res) => {
+    if (!req.body || !req.body.length) return res.status(400).json({ error: '没有收到包文件' });
+    const mode = req.body && req.query.mode === 'replace' ? 'replace' : 'merge';
+    // 包文件落临时目录再交给导入器（tar.list 需要文件路径）
+    const tmp = path.join(os.tmpdir(), `wb-import-${process.pid}-${Date.now()}.tar.gz`);
+    fs.writeFileSync(tmp, req.body);
+    try {
+      const r = await importAccountPack(tmp, { mode });
+      res.json({ ok: true, ...r });
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
+  })
+);
+
+
 /* ---------------- 静态资源 + SPA ---------------- */
 
-app.use(express.static(DIST));
+// 排查「刷新还拿旧包」用：记录页面/静态资源的请求（带 UA 前缀区分浏览器）
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/') && req.method === 'GET') {
+    console.log(`[http] ${req.path} ua=${String(req.headers['user-agent'] || '').slice(0, 60)}`);
+  }
+  next();
+});
+
+app.use(
+  express.static(DIST, {
+    // index.html 不缓存：它是新构建产物的入口，缓存了会导致「改完刷新还是旧界面」；
+    // assets 下的产物带内容哈希文件名，可以放心长缓存（express.static 默认 ETag 协商）
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store');
+    },
+  })
+);
 app.get(/^\/(?!api\/).*/, (req, res) => {
   res.sendFile(path.join(DIST, 'index.html'));
 });

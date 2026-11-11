@@ -6,9 +6,10 @@
  * 通过调试端口临时接管客户端。
  *
  * 版式（2026-11-05 二次改版，对齐「WorkBuddy 管理」的交互）：
- * - **页签视图（默认）**：顶部一排平台页签（总览 + 每平台一个），点页签切平台，
- *   每个平台的详情独立成页（积分、14 天矩阵、该平台全部记录）；
+ * - **页签视图（默认）**：顶部一排平台页签（总览 + 每平台一个 + 羊毛情报压轴），
+ *   点页签切平台，每个平台的详情独立成页（积分、14 天矩阵、该平台全部记录）；
  * - **列表视图**：原来的「领取清单」一行一条；
+ * - 领取记录两张表（总览 + 平台详情）都分页展示，不随数据增长无限拉长页面；
  * - 右上角随时切换两种视图，选择记进 localStorage；
  * - 每个平台一把独立浏览器锁：单平台的「检测 / 领取 / 登录」随时可用，
  *   批量运行期间不影响其它平台，也不影响登录窗口。
@@ -47,6 +48,7 @@ import {
   type NetState,
   CATEGORY_META,
   CATEGORY_ORDER,
+  RECORDS_PAGE_SIZE,
   STATUS_LABEL,
   avatarCls,
   matrixDotCls,
@@ -81,6 +83,8 @@ function PlatformRow({
   active,
   trial,
   loginActive,
+  toggling,
+  pendingEnabled,
   onOpen,
   onRun,
   onTrial,
@@ -91,6 +95,9 @@ function PlatformRow({
   active: boolean;
   trial?: { status: string; detail: string };
   loginActive: boolean;
+  toggling?: boolean;
+  /** 乐观目标值：开关保存期间用它显示目标状态，旧状态轮询打不回去 */
+  pendingEnabled?: boolean;
   onOpen: (id: string) => void;
   onRun: (id: string) => void;
   onTrial: (id: string) => void;
@@ -223,7 +230,7 @@ function PlatformRow({
           <Button size="xs" variant="subtle" disabled={active || !p.enabled || p.todayDone} onClick={() => onRun(p.id)}>
             {p.todayDone ? '已领取' : '领取'}
           </Button>
-          <Switch checked={p.enabled} onChange={(v) => onToggle(p.id, v)} title="开启后参与自动领取与一键执行" className="ml-1" />
+          <Switch checked={pendingEnabled ?? p.enabled} disabled={toggling} onChange={(v) => onToggle(p.id, v)} title="开启后参与自动领取与一键执行" className="ml-1" />
         </div>
       </div>
 
@@ -240,16 +247,24 @@ function PlatformRow({
 
 /* ---------------- 共享区块 ---------------- */
 
-/** 领取记录表（平台 / 状态 / 积分 / 说明 / 时间），总览页签与列表视图共用；支持平台筛选与只看异常 */
+/** 领取记录表（平台 / 状态 / 积分 / 说明 / 时间），总览页签与列表视图共用；支持平台筛选与只看异常。
+ *  服务端最多回 200 条，这里再按页展示（每页 20 条）：数据攒多了不至于把页面拉出几米长。 */
 function RecordsSection({ state, onRefresh, onOpen }: { state: NetState; onRefresh: () => void; onOpen: (id: string) => void }) {
   const [filterId, setFilterId] = useState<string>('all');
   const [onlyIssues, setOnlyIssues] = useState(false);
+  const [page, setPage] = useState(1);
 
   const rows = (state.recentResults || []).filter((r) => {
     if (filterId !== 'all' && r.id !== filterId) return false;
     if (onlyIssues && ['success', 'already', 'dry_run'].includes(r.status)) return false;
     return true;
   });
+
+  // 筛选条件变化后回到第一页；总条数变少（新的一轮跑完）时兜底夹在有效范围内
+  useEffect(() => setPage(1), [filterId, onlyIssues]);
+  const pageCount = Math.max(1, Math.ceil(rows.length / RECORDS_PAGE_SIZE));
+  const safePage = Math.min(page, pageCount);
+  const pageRows = rows.slice((safePage - 1) * RECORDS_PAGE_SIZE, safePage * RECORDS_PAGE_SIZE);
 
   /** 导出当前筛选下的记录为 CSV（带 BOM，Excel 直接打开不乱码） */
   const exportCsv = () => {
@@ -327,7 +342,7 @@ function RecordsSection({ state, onRefresh, onOpen }: { state: NetState; onRefre
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-50">
-              {rows.map((r, i) => (
+              {pageRows.map((r, i) => (
                 <tr
                   key={`${r.id}-${r.ts}-${i}`}
                   className="hover:bg-zinc-50/60 transition-colors cursor-pointer"
@@ -342,7 +357,7 @@ function RecordsSection({ state, onRefresh, onOpen }: { state: NetState; onRefre
                       <span className="text-[13px] text-zinc-700 truncate max-w-24">{r.name}</span>
                     </span>
                   </td>
-                  <td className="py-2.5">
+                  <td className="py-2.5 whitespace-nowrap">
                     <span className="inline-flex items-center gap-1.5">
                       <span className={`inline-block h-1.5 w-1.5 rounded-full ${statusDotCls(r.status)}`} />
                       <span className={`text-xs font-medium ${statusTextCls(r.status)}`}>{STATUS_LABEL[r.status] || r.status}</span>
@@ -374,6 +389,29 @@ function RecordsSection({ state, onRefresh, onOpen }: { state: NetState; onRefre
             </tbody>
           </table>
         </div>
+        {/* 分页：记录只在服务端留 200 条，但 200 行一张表也够把页面拉爆，按页翻 */}
+        {rows.length > 0 && (
+          <div className="flex flex-wrap items-center gap-3 px-4 py-2.5 border-t border-zinc-100 text-xs text-zinc-500">
+            <span className="tabular-nums">
+              第 <b className="font-mono text-zinc-700">{safePage}</b> / {pageCount} 页 · 共 {rows.length} 条 · 本页 {pageRows.length} 条
+            </span>
+            <span className="text-zinc-300">导出不受分页影响，始终是当前筛选的全部记录</span>
+            <div className="ml-auto flex items-center gap-1.5">
+              <Button size="sm" variant="subtle" disabled={safePage <= 1} onClick={() => setPage(1)}>
+                首页
+              </Button>
+              <Button size="sm" variant="subtle" disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>
+                上一页
+              </Button>
+              <Button size="sm" variant="subtle" disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)}>
+                下一页
+              </Button>
+              <Button size="sm" variant="subtle" disabled={safePage >= pageCount} onClick={() => setPage(pageCount)}>
+                末页
+              </Button>
+            </div>
+          </div>
+        )}
       </Card>
     </PageSection>
   );
@@ -464,6 +502,13 @@ export default function NetCheckinPage() {
   const [state, setState] = useState<NetState | null>(null);
   const [logs, setLogs] = useState<LogRow[]>([]);
   const [busy, setBusy] = useState(false);
+  /** 点击后本地置忙的批次/平台 → 提交时刻。服务端是异步启动（POST 毫秒级返回），
+   *  真正的「执行中」要等下一次轮询的 activeIds/running 才可见，而空闲轮询 30 秒一拍——
+   *  不本地置忙的话按钮点了像没点（首次还要先拉起浏览器，更久）。
+   *  轮询看到接管即清除，60 秒兜底过期；key 是平台 id（单平台，逗号分隔）或 '__batch__'。 */
+  const [pendingIds, setPendingIds] = useState<Record<string, number>>({});
+  /** 本地 pending 合并进「执行中」判定 */
+  const isPending = (id: string) => Object.keys(pendingIds).some((k) => k.split(',').includes(id));
   /** 运行输出面板是否展开：批量运行时强制展开 */
   const [showLog, setShowLog] = useState(false);
   const [login, setLogin] = useState<LoginStatus | null>(null);
@@ -484,14 +529,25 @@ export default function NetCheckinPage() {
     }
   }, []);
 
+  /** 状态版本号守卫：开关保存后，更早发出的轮询响应会带着旧状态晚到，
+   *  直接 setState 会把刚切好的开关打回去（用户看到「闪一下又切回来」）。
+   *  服务端在开关/定时变更时自增 rev，这里只接受 rev 不小于已应用值的响应。 */
+  const stateRev = useRef(0);
+  const applyState = useCallback((s: NetState) => {
+    const rev = typeof s.rev === 'number' ? s.rev : 0;
+    if (rev && rev < stateRev.current) return;
+    if (rev) stateRev.current = rev;
+    setState(s);
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const s = await get<NetState>('/api/netcheckin/state');
-      setState(s);
+      applyState(s);
     } catch {
       /* 服务断开时 ServiceBanner 会兜底提示 */
     }
-  }, []);
+  }, [applyState]);
 
   const pullLogs = useCallback(async () => {
     try {
@@ -544,12 +600,25 @@ export default function NetCheckinPage() {
   const prevRunning = useRef(false);
   const prevLastRunTs = useRef(0);
   const loginWarned = useRef<Set<string>>(new Set());
+  const pendingCount = Object.keys(pendingIds).length;
   useEffect(() => {
-    const anyActive = state?.running || (state?.activeIds?.length || 0) > 0;
+    const anyActive = state?.running || (state?.activeIds?.length || 0) > 0 || busy || pendingCount > 0;
     const t = setInterval(async () => {
       const s = await get<NetState>('/api/netcheckin/state').catch(() => null);
       if (s) {
-        setState(s);
+        applyState(s);
+        // 本地 pending：服务端接管（running/activeIds 亮起）即清除，60 秒兜底过期
+        setPendingIds((prev) => {
+          const keys = Object.keys(prev);
+          if (!keys.length) return prev;
+          const now = Date.now();
+          const next: Record<string, number> = {};
+          for (const k of keys) {
+            const taken = k === '__batch__' ? s.running : k.split(',').every((id) => s.activeIds?.includes(id));
+            if (!taken && now - prev[k] <= 60_000) next[k] = prev[k];
+          }
+          return next;
+        });
         if (prevRunning.current && !s.running) {
           if (s.lastRun && s.lastRun.ts !== prevLastRunTs.current) {
             // 正式运行：按轮次汇总
@@ -583,7 +652,7 @@ export default function NetCheckinPage() {
       await pullLogs();
     }, anyActive ? 2_000 : 30_000);
     return () => clearInterval(t);
-  }, [state?.running, state?.activeIds?.length, pullLogs, toast]);
+  }, [state?.running, state?.activeIds?.length, pullLogs, toast, applyState, busy, pendingCount]);
 
   // 登录窗口状态轮询：只在有登录会话时进行
   useEffect(() => {
@@ -602,29 +671,71 @@ export default function NetCheckinPage() {
     return () => clearInterval(t);
   }, [login?.stage, login, toast, refresh]);
 
-  const startRun = async (opts: { only?: string[]; dryRun?: boolean }, quiet = false) => {
+  const startRun = async (opts: { only?: string[]; dryRun?: boolean }): Promise<{ started: boolean }> => {
+    const ids = opts.only || [];
+    const key = ids.length ? ids.join(',') : '__batch__';
+    setPendingIds((prev) => ({ ...prev, [key]: Date.now() }));
     setBusy(true);
     try {
-      await post('/api/netcheckin/run', opts);
+      const r = await post<{ started?: boolean; ok?: boolean; error?: string }>('/api/netcheckin/run', opts);
+      if (r && r.ok === false) {
+        // 平台忙 / 批量运行中：服务端没跑起来。之前这里静默吞掉，点了像没点
+        toast('warn', r.error || '没有开始执行');
+        setPendingIds((prev) => {
+          const { [key]: _drop, ...rest } = prev;
+          return rest;
+        });
+        return { started: false };
+      }
       // 运行状态由轮询带回来；先把日志游标推进到当前末尾，只展示本轮的输出
       logSeq.current = 0;
       setLogs([]);
       await pullLogs();
-      if (!quiet) toast('info', opts.dryRun ? '已开始检测，结论会标注在每一行上' : '已开始执行，过程见运行输出');
+      const label = ids.length === 1 ? state?.platforms.find((p) => p.id === ids[0])?.name || ids[0] : '';
+      toast(
+        'info',
+        opts.dryRun
+          ? `${label ? `${label} ` : ''}检测已开始：会先启动浏览器，结论出来自动标注在页面上`
+          : `${label ? `${label} ` : ''}已开始执行：会先启动浏览器，结果出来自动更新`
+      );
       if (opts.dryRun) setShowLog(true);
+      return { started: true };
     } catch (e: any) {
       toast('err', e?.message || '启动失败');
+      setPendingIds((prev) => {
+        const { [key]: _drop, ...rest } = prev;
+        return rest;
+      });
+      return { started: false };
     } finally {
       setBusy(false);
     }
   };
 
+  /** 开关保存中的平台 id + 乐观目标值：点击立即翻到目标状态（不再等往返），
+   *  保存/刷新期间轮询的旧状态也盖不掉它；保存失败时清掉、弹回原状并报错 */
+  const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set());
+  const [pendingEnabled, setPendingEnabled] = useState<Record<string, boolean>>({});
+
   const togglePlatform = async (id: string, enabled: boolean) => {
+    setTogglingIds((prev) => new Set(prev).add(id));
+    setPendingEnabled((prev) => ({ ...prev, [id]: enabled }));
     try {
       await post('/api/netcheckin/toggle', { id, enabled });
-      refresh();
+      await refresh();
     } catch (e: any) {
-      toast('err', e?.message || '切换失败');
+      toast('err', `保存开关失败：${e?.message || '未知错误'}`);
+    } finally {
+      setTogglingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      setPendingEnabled((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _drop, ...rest } = prev;
+        return rest;
+      });
     }
   };
 
@@ -729,13 +840,13 @@ export default function NetCheckinPage() {
             variant="ghost"
             size="sm"
             disabled={state.running || busy}
-            loading={busy}
+            loading={busy || !!pendingIds['__batch__'] || state.running}
             onClick={() => startRun({ dryRun: true })}
             title="并行核对网页类平台的入口与登录态（含未启用的），不点击、不动客户端；结论会标注在每一行/每个页签上"
           >
             检测
           </Button>
-          <Button variant="primary" size="sm" disabled={state.running || busy} loading={busy} onClick={() => startRun({})}>
+          <Button variant="primary" size="sm" disabled={state.running || busy} loading={busy || !!pendingIds['__batch__'] || state.running} onClick={() => startRun({})}>
             一键领取
           </Button>
         </div>
@@ -750,7 +861,7 @@ export default function NetCheckinPage() {
               className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs transition-all duration-150 ${
                 activeTab === 'overview' ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
               }`}
-              title="全部平台的领取记录、运行输出与羊毛情报"
+              title="全部平台的领取记录与运行输出"
             >
               总览
             </button>
@@ -766,10 +877,27 @@ export default function NetCheckinPage() {
                 <span className={`w-4 h-4 rounded flex items-center justify-center text-[10px] font-semibold ${avatarCls(p.id)}`}>{p.name.slice(0, 1)}</span>
                 <span className="max-w-28 truncate">{p.name}</span>
                 <span
-                  className={`inline-block h-1.5 w-1.5 rounded-full ${state.activeIds?.includes(p.id) ? 'bg-blue-500 animate-pulse' : p.lastStatus ? statusDotCls(p.lastStatus) : 'bg-zinc-200'}`}
+                  className={`inline-block h-1.5 w-1.5 rounded-full ${state.activeIds?.includes(p.id) || isPending(p.id) ? 'bg-blue-500 animate-pulse' : p.lastStatus ? statusDotCls(p.lastStatus) : 'bg-zinc-200'}`}
                 />
               </button>
             ))}
+            {/* 羊毛情报压轴：代领不了、只能自己动手的平台清单，固定在页签条最后。
+                hash 用 netcheckin/manual：与平台页签同一套路，点完不会被 hashchange 弹回总览 */}
+            {state.manualPlatforms.length > 0 && (
+              <button
+                onClick={() => {
+                  switchTab('manual');
+                  if (parseSubId() !== 'manual') location.hash = 'netcheckin/manual';
+                }}
+                className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs transition-all duration-150 ${
+                  activeTab === 'manual' ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
+                }`}
+                title="羊毛情报：无法由控制台代领、需要自己动手的平台清单"
+              >
+                <span className="w-4 h-4 rounded flex items-center justify-center text-[10px] font-semibold bg-violet-100 text-violet-600">羊</span>
+                <span>羊毛情报</span>
+              </button>
+            )}
           </div>
         )}
       </Card>
@@ -790,7 +918,7 @@ export default function NetCheckinPage() {
       {/* ============ 页签视图 ============ */}
       {view === 'tab' && (
         <>
-          {/* 总览页签：概览数字 + 领取记录 + 运行输出 + 羊毛情报 */}
+          {/* 总览页签：概览数字 + 领取记录 + 运行输出 */}
           <div className={activeTab === 'overview' ? 'space-y-6' : 'hidden'}>
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
               <StatCard
@@ -845,29 +973,51 @@ export default function NetCheckinPage() {
                 </Card>
               )}
 
-              {/* 全平台 14 天领取热力图：一行一个平台，点行跳页签 */}
+              {/* 全平台 14 天领取热力图：一行一个平台，点行跳页签。
+                  色块按 flex-1 撑满整行（固定高度），配一行日期表头——不然宽屏下右侧一大片空白 */}
               <PageSection icon={<IconCalendar />} title="近 14 天总览" desc="青绿=已领 · 琥珀=受阻 · 玫红=失败 · 灰=未执行，点平台名看详情">
-                <Card className="p-4 space-y-1.5">
-                  {sorted.map((p) => (
-                    <button
-                      key={p.id}
-                      onClick={() => openPlatform(p.id)}
-                      className="w-full flex items-center gap-3 rounded-lg px-2 py-1 hover:bg-zinc-50 transition-colors text-left"
-                      title={`查看 ${p.name} 详情`}
-                    >
-                      <span className="w-24 shrink-0 truncate text-xs text-zinc-600">{p.name}</span>
-                      <span className="flex items-center gap-1">
-                        {Object.keys(p.matrix || {}).map((d) => (
-                          <span
-                            key={d}
-                            className={`inline-block h-3.5 w-3.5 rounded ${matrixDotCls(p.matrix[d])}`}
-                            title={`${p.name} · ${d}：${STATUS_LABEL[p.matrix[d] || ''] || '未执行'}`}
-                          />
+                <Card className="p-4 space-y-1">
+                  {(() => {
+                    const dateKeys = Object.keys(sorted.find((p) => Object.keys(p.matrix || {}).length)?.matrix || {});
+                    if (!dateKeys.length) return <div className="py-4 text-center text-sm text-zinc-400">还没有数据</div>;
+                    return (
+                      <>
+                        <div className="flex items-center gap-3 px-2 pb-1">
+                          <span className="w-24 shrink-0" />
+                          <span className="flex flex-1 gap-1 min-w-0">
+                            {dateKeys.map((d) => (
+                              <span key={d} className="flex-1 text-center text-[10px] text-zinc-400 tabular-nums">
+                                {d.slice(5)}
+                              </span>
+                            ))}
+                          </span>
+                          <span className="w-24 shrink-0" />
+                        </div>
+                        {sorted.map((p) => (
+                          <button
+                            key={p.id}
+                            onClick={() => openPlatform(p.id)}
+                            className="w-full flex items-center gap-3 rounded-lg px-2 py-1 hover:bg-zinc-50 transition-colors text-left"
+                            title={`查看 ${p.name} 详情`}
+                          >
+                            <span className="w-24 shrink-0 truncate text-xs text-zinc-600">{p.name}</span>
+                            <span className="flex flex-1 items-center gap-1 min-w-0">
+                              {dateKeys.map((d) => (
+                                <span
+                                  key={d}
+                                  className={`h-5 flex-1 rounded ${matrixDotCls(p.matrix[d])}`}
+                                  title={`${p.name} · ${d}：${STATUS_LABEL[p.matrix[d] || ''] || '未执行'}`}
+                                />
+                              ))}
+                            </span>
+                            <span className="w-24 shrink-0 flex justify-end">
+                              {p.streak >= 2 && <Badge color="teal">连续 {p.streak} 天</Badge>}
+                            </span>
+                          </button>
                         ))}
-                      </span>
-                      {p.streak >= 2 && <Badge color="teal">连续 {p.streak} 天</Badge>}
-                    </button>
-                  ))}
+                      </>
+                    );
+                  })()}
                 </Card>
               </PageSection>
             <RecordsSection state={state} onRefresh={refresh} onOpen={openPlatform} />
@@ -894,6 +1044,10 @@ export default function NetCheckinPage() {
                 </div>
               )}
             </PageSection>
+          </div>
+
+          {/* 羊毛情报页签：代领不了、只能自己动手的平台清单（压轴页签，不再挤在总览里） */}
+          <div className={activeTab === 'manual' ? 'space-y-6' : 'hidden'}>
             <ManualSection platforms={state.manualPlatforms} />
           </div>
 
@@ -906,11 +1060,14 @@ export default function NetCheckinPage() {
                   state={state}
                   trial={state.trial?.[p.id]}
                   login={login}
+                  toggling={togglingIds.has(p.id)}
+                  pendingEnabled={pendingEnabled[p.id]}
+                  pendingActive={isPending(p.id)}
                   onBack={() => switchTab('overview')}
                   showBack={false}
                   visible={activeTab === p.id}
                   onRefresh={refresh}
-                  onRun={(id, opts) => startRun({ only: [id], ...(opts || {}) }, true)}
+                  onRun={(id, opts) => startRun({ only: [id], ...(opts || {}) })}
                   onToggle={togglePlatform}
                   onLogin={startLogin}
                   onCancelLogin={cancelLogin}
@@ -942,12 +1099,14 @@ export default function NetCheckinPage() {
                       <PlatformRow
                         key={p.id}
                         p={p}
-                        active={state.activeIds?.includes(p.id) || false}
+                        active={state.activeIds?.includes(p.id) || isPending(p.id)}
                         trial={state.trial?.[p.id]}
                         loginActive={login?.stage === 'waiting' && login.id === p.id}
+                        toggling={togglingIds.has(p.id)}
+                        pendingEnabled={pendingEnabled[p.id]}
                         onOpen={openPlatform}
-                        onRun={(id) => startRun({ only: [id] }, true)}
-                        onTrial={(id) => startRun({ only: [id], dryRun: true }, true)}
+                        onRun={(id) => startRun({ only: [id] })}
+                        onTrial={(id) => startRun({ only: [id], dryRun: true })}
                         onToggle={togglePlatform}
                         onLogin={startLogin}
                       />

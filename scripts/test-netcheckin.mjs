@@ -44,7 +44,9 @@ const check = (name, cond, extra = '') => {
 /* ---------------- 1. 注册表完整性 ---------------- */
 
 const ids = BUILTIN_PLATFORMS.map((p) => p.id);
-check('内置平台 ≥ 12 个', BUILTIN_PLATFORMS.length >= 12, String(BUILTIN_PLATFORMS.length));
+// 下限故意放得很低：清单会随实际运营收缩（扣子停服移除、智谱移入羊毛情报等），
+// 这里只防「注册表整个丢了」，不锁定具体数量
+check('内置平台 ≥ 3 个', BUILTIN_PLATFORMS.length >= 3, String(BUILTIN_PLATFORMS.length));
 check('平台 id 唯一', new Set(ids).size === ids.length);
 
 for (const p of BUILTIN_PLATFORMS) {
@@ -64,7 +66,7 @@ for (const p of BUILTIN_PLATFORMS) {
 
 /* ---------------- 2. 配置合并与自定义平台 ---------------- */
 
-// 默认状态：与注册表的 defaultEnabled 一致（智谱清言默认开，其余默认关）
+// 默认状态：与注册表的 defaultEnabled 一致（内置平台目前默认全关）
 const defaults = resolvePlatforms(loadConfig());
 check(
   '默认状态与注册表 defaultEnabled 一致',
@@ -72,23 +74,23 @@ check(
 );
 
 // 用户开关覆盖：只写 enabled 不丢其他字段；只写关键词不碰开关
-saveConfig({ platforms: { doubao: { enabled: true }, zhipu: { keywords: ['我的关键词'] } } });
+saveConfig({ platforms: { doubao: { enabled: true }, minimax: { keywords: ['我的关键词'] } } });
 const merged = resolvePlatforms(loadConfig());
 check('用户可启用内置平台', merged.find((p) => p.id === 'doubao')?.enabled === true);
-check('字段覆盖不影响开关', merged.find((p) => p.id === 'zhipu')?.enabled === true);
-check('关键词逐字段覆盖生效', merged.find((p) => p.id === 'zhipu')?.keywords?.includes('我的关键词') === true);
+check('字段覆盖不影响开关', merged.find((p) => p.id === 'minimax')?.enabled === false);
+check('关键词逐字段覆盖生效', merged.find((p) => p.id === 'minimax')?.keywords?.includes('我的关键词') === true);
 
 // custom 平台：可登记；撞内置 id 的被忽略
 saveConfig({
   platforms: {},
   custom: [
     { id: 'mysite', name: '我的站', url: 'https://example.com', keywords: ['签到'] },
-    { id: 'zhipu', name: '假冒智谱', url: 'https://fake.example' },
+    { id: 'minimax', name: '假冒 MiniMax', url: 'https://fake.example' },
   ],
 });
 const withCustom = resolvePlatforms(loadConfig());
 check('custom 平台可登记', withCustom.some((p) => p.id === 'mysite'));
-check('撞内置 id 的 custom 被忽略', withCustom.filter((p) => p.id === 'zhipu').length === 1);
+check('撞内置 id 的 custom 被忽略', withCustom.filter((p) => p.id === 'minimax').length === 1);
 
 /* ---------------- 3. 每日随机延迟 ---------------- */
 

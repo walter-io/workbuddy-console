@@ -15,8 +15,8 @@
 
 import path from 'node:path';
 import { lockFor, acquireContext, releaseContext } from './browser.mjs';
-import { resolvePlatforms, loadConfig, appendResult, readResults, todayStr, shotDirForToday, pruneShots } from './store.mjs';
-import { runZhipu, runGenericWeb, dryRunWeb, runMinimax, runClientCheckin, clientInstalled, zhipuProbeRun, comateProbeRun } from './engines.mjs';
+import { resolvePlatforms, loadConfig, saveConfigAsync, appendResult, readResults, todayStr, shotDirForToday, pruneShots } from './store.mjs';
+import { runGenericWeb, dryRunWeb, runMinimax, runClientCheckin, clientInstalled, comateProbeRun } from './engines.mjs';
 import { snapshot, dumpHtml } from './dom.mjs';
 import { isClientRunning, MANUAL_PLATFORMS } from './registry.mjs';
 import { loginOkSince, markLoginOk } from './login.mjs';
@@ -252,25 +252,36 @@ async function runOne(platform, { dryRun }) {
     let result;
     let shot = null;
     try {
-      const ctx = await acquireContext(platform.id, { headless: !platform.headed, logger });
+      const ctx = await acquireContext(platform.id, { headless: !platform.headed, logger, proxy: platform.proxy });
       if (platform.headed) pushLog('info', `${platform.name} 需要可见浏览器窗口，已弹出窗口执行（站点风控要求）`);
       const page = await ctx.newPage();
       let work;
-      // 智谱的领取走签名接口、MiniMax 有自己的三步导航——检测各走各的专用路径，
-      // 其余平台用通用页面体检
+      // MiniMax 有自己的三步导航、Comate 检测走专用探测——其余平台用通用页面体检
       if (dryRun) {
         work =
-          platform.engine === 'zhipu-api'
-            ? zhipuProbeRun(page, logger)
-            : platform.engine === 'minimax-web'
-              ? runMinimax(page, logger, { dryRun: true })
-              : platform.id === 'comate'
-                ? comateProbeRun(page, ctx, logger)
-                : dryRunWeb(platform, page, logger);
-      } else if (platform.engine === 'zhipu-api') work = runZhipu(page, logger);
-      else if (platform.engine === 'minimax-web') work = runMinimax(page, logger, { dryRun });
-      else work = runGenericWeb(platform, page, logger);
+          platform.engine === 'minimax-web'
+            ? runMinimax(page, logger, { dryRun: true })
+            : platform.id === 'comate'
+              ? comateProbeRun(page, ctx, logger)
+              : dryRunWeb(platform, page, logger, ctx);
+      } else if (platform.engine === 'minimax-web') work = runMinimax(page, logger, { dryRun });
+      else work = runGenericWeb(platform, page, logger, ctx);
       result = await withTimeout(work, PLATFORM_TIMEOUT_MS, platform.name);
+
+      // 余额随跑随记：检测/领取只要报回余额就落盘（balances），状态页随时能显示
+      // 最近一次的余额，不必等下一次真实领取。失败不影响主流程。
+      const bal = result.meta?.credits;
+      if (Number.isFinite(bal)) {
+        void (async () => {
+          try {
+            const c = loadConfig();
+            c.balances = { ...(c.balances || {}), [platform.id]: { credits: bal, at: Date.now() } };
+            await saveConfigAsync(c);
+          } catch {
+            /* 余额记账失败不影响主流程 */
+          }
+        })();
+      }
 
       // 不管结果好坏都截图存档；状态拿不准或失败的额外存一份 HTML，方便离线复盘
       if (!page.isClosed()) {
@@ -508,19 +519,29 @@ export function buildNetCheckinState() {
       } else break;
     }
 
-    // 积分信息：最近一次已知的余额 + 历史累计到账（只在引擎报过数时才统计）
+    // 积分信息：最近一次已知的余额 + 历史累计到账（只在引擎报过数时才统计）。
+    // 流水没有余额时回退到 balances 记账（检测/领取顺带抓到的余额都会落盘）
     let credits = null;
+    let balanceAt = null;
     let totalGained = 0;
     let hasGained = false;
     let successCount = 0;
     for (const r of mine) {
       const { credits: c, gain } = parsePoints(r.detail, r.meta);
-      if (c !== null) credits = c; // 后写的覆盖先写的（升序遍历，最后赋值即最新）
+      if (c !== null) {
+        credits = c; // 后写的覆盖先写的（升序遍历，最后赋值即最新）
+        balanceAt = r.ts;
+      }
       if (Number.isFinite(gain) && ['success', 'already'].includes(r.status)) {
         totalGained += gain;
         hasGained = true;
       }
       if (r.status === 'success' || r.status === 'already') successCount++;
+    }
+    const bal = cfg.balances?.[p.id];
+    if (credits === null && bal && Number.isFinite(bal.credits)) {
+      credits = bal.credits;
+      balanceAt = bal.at || null;
     }
 
     return {
@@ -550,6 +571,8 @@ export function buildNetCheckinState() {
       lastLoginAt: cfg.logins?.[p.id] || null,
       /** 已知积分余额（最近一次查询到的）与累计到账 */
       credits,
+      /** 余额的记账时间：流水里带出来的用记录时间，balances 记账用落盘时间 */
+      balanceAt: balanceAt || null,
       totalGained: hasGained ? totalGained : null,
       successCount,
       /** 网页平台是否需要用户去登录：登录失效（且没有重新登录过），或从没登录过 */
