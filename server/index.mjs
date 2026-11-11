@@ -81,7 +81,7 @@ import {
 } from './proxy/index.mjs';
 import { pickTestModel } from './proxy/index.mjs';
 import { stopWorkbuddy, launchWorkbuddy } from './targets/workbuddy.mjs';
-import { listSessionsForSwitch, copySessions, moveSessionsToAccount, syncAllAccounts, dedupeSessions, sessionDataRoot, copyVariantIntoAccount, currentUidOfVariant, warmSessionSignatures } from './workbuddy/sessions.mjs';
+import { listSessionsForSwitch, copySessions, moveSessionsToAccount, syncAllAccounts, dedupeSessions, sessionDataRoot, copyVariantIntoAccount, currentUidOfVariant, warmSessionSignatures, closeAllSessionDbs } from './workbuddy/sessions.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -214,10 +214,21 @@ async function withAppRestart(fn) {
   }
   // 等进程真的消失再动库：taskkill 返回 ≠ 句柄释放，WorkBuddy 还可能被系统
   // 「崩溃自动恢复」在几秒内重新拉起（新实例会重新打开 workbuddy.db）。
-  // 写入落在这个窗口里就会撞锁或被回滚——用户看到的是「说成功了，会话没动」。
+  // 写入落在这个窗口里就会撞锁或被回滚——实测报「attempt to write a readonly
+  // database」（复活实例持有 WAL 库时的典型报错），会话搬家 1 个没搬过去。
+  // 探到活体就**再杀一轮**，最多 3 轮（每次等 5 秒）；全失败才带伤写入。
   if (stop?.wasRunning) {
-    const gone = await waitForWorkbuddyGone(4000);
-    if (!gone) console.log('[restart] 关闭后 4 秒内仍检测到 WorkBuddy 进程，仍继续写入（可能撞锁，失败会重试）');
+    let gone = await waitForWorkbuddyGone(4000);
+    for (let round = 1; !gone && round <= 3; round++) {
+      console.log(`[restart] WorkBuddy 被崩溃恢复拉起（第 ${round} 轮重新冻结）`);
+      try {
+        await killWorkbuddy(stop.exePath || null);
+      } catch (e) {
+        console.log('[restart] 再次关闭失败：' + (e?.message || e));
+      }
+      gone = await waitForWorkbuddyGone(5000);
+    }
+    if (!gone) console.log('[restart] 多轮冻结后仍检测到 WorkBuddy 进程，仍继续写入（可能撞锁）');
   }
   const tStop = Date.now();
   let result = null;
@@ -257,6 +268,39 @@ function launchWorkbuddyInBackground(exePath, tag = '') {
     .then((r) => console.log(`[launch${tag}] 窗口就绪 ${Date.now() - t}ms verified=${r?.verified}`))
     .catch((e) => console.log(`[launch${tag}] 打开失败：${e?.message || e}`));
   return { launched: true, background: true };
+}
+
+/** 会话搬移报告里是否携带「库被锁为只读」类错误 */
+function moveReportHasReadonlyLock(report) {
+  return (report?.errors || []).some((e) => /readonly database|database is locked/i.test(String(e?.error || '')));
+}
+
+/**
+ * 会话搬移的只读重试壳：撞上「会话库被锁为只读」时最多重跑 3 次（间隔 8s/20s），
+ * 每次重试前先 `closeAllSessionDbs()` 重置本进程的 SQLite 状态（坏映射自愈）。
+ * runFn 要么返回搬移报告，要么抛错；抛错仅当错误含 readonly 才重试，其余原样上抛。
+ */
+async function runMoveWithReadonlyRetry(runFn, tag) {
+  let lastOut = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      const wait = attempt === 2 ? 8000 : 20000;
+      console.log(`[${tag}] 只读锁窗未过，重置会话库连接并等待 ${Math.round(wait / 1000)}s 后重试（第 ${attempt}/3 次）`);
+      closeAllSessionDbs();
+      await new Promise((r) => setTimeout(r, wait));
+    }
+    try {
+      const out = await runFn();
+      if (!moveReportHasReadonlyLock(out)) return out;
+      lastOut = out;
+      console.log(`[${tag}] 报告含 readonly 错误（${out.errors.length} 条）`);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      if (attempt === 3 || !/readonly/i.test(msg)) throw e;
+      console.log(`[${tag}] ${msg}`);
+    }
+  }
+  return lastOut;
 }
 
 async function runWithAppClosed(fn) {
@@ -1046,11 +1090,15 @@ app.post(
       let sessionCopy = null;
       if (ids.length && crossAccountOpsOn()) {
         try {
-          sessionCopy = await moveSessionsToAccount({
-            targetAccountId: id,
-            ids,
-            sourceVariant: ['cn', 'ai'].includes(String(req.body?.sourceVariant)) ? String(req.body.sourceVariant) : null,
-          });
+          sessionCopy = await runMoveWithReadonlyRetry(
+            () =>
+              moveSessionsToAccount({
+                targetAccountId: id,
+                ids,
+                sourceVariant: ['cn', 'ai'].includes(String(req.body?.sourceVariant)) ? String(req.body.sourceVariant) : null,
+              }),
+            'switch'
+          );
         } catch (err) {
           throw Object.assign(new Error(`会话搬家失败，已中止切换：${err?.message || err}`), { status: 400 });
         }
@@ -1356,7 +1404,7 @@ app.post(
     }
     if (req.body?.stopApp !== false) {
       const { result, appStop, relaunch } = await withSessionOpLock(() =>
-        withAppRestart(() => moveSessionsToAccount({ targetAccountId, ids, sourceVariant }))
+        withAppRestart(() => runMoveWithReadonlyRetry(() => moveSessionsToAccount({ targetAccountId, ids, sourceVariant }), 'move'))
       );
       logMove(result, targetAccountId);
       res.json({ ...result, appStop, relaunch });

@@ -893,23 +893,89 @@ async function retryDbWrite(fn, { tries = 4, delays = [120, 300, 700] } = {}) {
   throw lastErr;
 }
 
+/** 本进程内打开的全部会话库连接：closeAllSessionDbs 用来在只读降级自愈时整体重置 */
+const OPEN_SESSION_DBS = new Set();
+
+/** 关闭本进程内（除 except 外）全部会话库连接并清出登记表 */
+export function closeAllSessionDbs(except = null) {
+  for (const d of [...OPEN_SESSION_DBS]) {
+    if (d === except) continue;
+    try {
+      d.close();
+    } catch {
+      /* 已关闭/已损坏都无所谓 */
+    }
+    OPEN_SESSION_DBS.delete(d);
+  }
+}
+
+const READONLY_CANARY_SQL = 'UPDATE sessions SET updated_at = updated_at WHERE id = "__readonly_canary__"';
+
 /** 打开会话数据库；readOnly 用于只读查询，写操作必须用读写连接 */
 async function openSessionDb(variantId, { readOnly = false } = {}) {
   const { DatabaseSync } = await sqlite();
   const file = sessionDbPath(variantId);
   if (!fs.existsSync(file)) throw new Error(`会话数据库不存在：${file}（请先运行一次 WorkBuddy）`);
-  const db = new DatabaseSync(file, { readOnly, timeout: readOnly ? 5000 : 8000 });
-  // WAL + synchronous=NORMAL 是 SQLite 官方推荐组合：少一次 fsync，写入快一个量级，
-  // 崩溃最多丢最后几笔事务（本工具是可重跑的同步，可接受）。只读连接不动。
-  if (!readOnly) {
-    try {
-      db.exec('PRAGMA journal_mode = WAL');
-      db.exec('PRAGMA synchronous = NORMAL');
-    } catch {
-      /* PRAGMA 失败不影响主流程 */
+  // 连接登记 + close 包一层：closeAllSessionDbs 重置时能把登记表同步清干净
+  const wrapClose = (db) => {
+    OPEN_SESSION_DBS.add(db);
+    const origClose = db.close.bind(db);
+    db.close = (...args) => {
+      OPEN_SESSION_DBS.delete(db);
+      return origClose(...args);
+    };
+    return db;
+  };
+  const db = wrapClose(new DatabaseSync(file, { readOnly, timeout: readOnly ? 5000 : 8000 }));
+  // ⚠️ 实测（2026-11-03，另一台机器的并行调试定稿）：WAL 模式下两个辅助文件（-shm/-wal）
+  // 会被 WorkBuddy 复活实例间歇性锁住，SQLite 把连接**静默降级成只读**，所有写报
+  // 「attempt to write a readonly database」。回滚日志模式（DELETE，WorkBuddy 原生）
+  // 从未出现此问题。journal_mode 持久化在库头，必须显式改回去；WorkBuddy 运行中会
+  // BUSY 静默跳过——届时由冻结 WorkBuddy 后的写路径再改。
+  if (readOnly) return db;
+  try {
+    db.exec('PRAGMA journal_mode = DELETE');
+    db.exec('PRAGMA synchronous = FULL');
+  } catch {
+    /* WorkBuddy 在跑时会 BUSY，静默跳过；冻结后可写路径再恢复 */
+  }
+  // 只读降级探测（安全网）：若仍处于 WAL 且辅助文件被锁，零行 UPDATE 会报 readonly
+  // ——立即自愈（重置本进程全部连接）或抛出明确错误，不让用户撞到搬到一半的失败。
+  try {
+    db.prepare(READONLY_CANARY_SQL).run();
+    return db;
+  } catch (err) {
+    if (!/readonly/i.test(String(err?.message || err))) {
+      closeAllSessionDbs(db);
+      db.close();
+      throw err;
     }
   }
-  return db;
+  // 只读降级 → 自愈：关掉本进程内其它连接（清除坏映射）→ 关掉自己 → 稍候重开再探
+  console.log('[sessions] 会话库连接被降级为只读，重置本进程全部会话库连接后重试');
+  closeAllSessionDbs(db);
+  try {
+    db.close();
+  } catch {
+    /* ignore */
+  }
+  await sleep(1500);
+  const d2 = wrapClose(new DatabaseSync(file, { readOnly: false, timeout: 8000 }));
+  try {
+    d2.exec('PRAGMA journal_mode = DELETE');
+    d2.exec('PRAGMA synchronous = FULL');
+    d2.prepare(READONLY_CANARY_SQL).run();
+    console.log('[sessions] 连接重置后恢复可写');
+    return d2;
+  } catch (err) {
+    closeAllSessionDbs(d2);
+    try {
+      d2.close();
+    } catch {
+      /* ignore */
+    }
+    throw new Error(`会话库被锁为只读（${String(err?.message || err).slice(0, 60)}）：请确认 WorkBuddy 已完全退出后重试`);
+  }
 }
 
 /** 递归索引 projects/：会话id → 正文完整路径（符号链接天然被排除） */
