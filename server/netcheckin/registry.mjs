@@ -12,6 +12,7 @@
 
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import iconv from 'iconv-lite';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -226,129 +227,380 @@ export function normalizePlatform(p) {
   };
 }
 
-/** 客户端可执行文件解析：显式路径存在 → 用它；否则在候选里找第一个真实存在的 */
-export function resolveClientExe(p) {
-  const candidates = [];
-  if (p.app) candidates.push(p.app);
-  if (Array.isArray(p.appCandidates)) candidates.push(...p.appCandidates);
-  // Launcher 只是引导壳（改名/装更新用，非 Electron 主程序，CDP 接管不了）——
-  // 拆出来最后兜底：优先静态主程序候选，再注册表发现，最后才接受 Launcher
-  const isLauncher = (c) => /launcher/i.test(String(c || ''));
-  for (const c of candidates) {
-    if (c && !isLauncher(c) && fs.existsSync(c)) return c;
-  }
-  // 静态主程序候选全部落空：查注册表 Uninstall 键兜底。NSIS 安装器允许自选盘符
-  // （用户实测装在 E:\Program Files\Qoder CN\），任何环境变量路径都覆盖不到；
-  // 卸载键里的 DisplayIcon 一定指向真实安装目录。
-  // DisplayName 按平台名模糊匹配（qoder-cn → "Qoder CN"，豆包 → "豆包/Doubao"）。
-  if (isWindows) {
-    const found = findInstalledViaRegistry(p.id, p.name);
-    if (found) return found;
-  }
-  // Launcher 兜底（总比报「未安装」好——至少进程在，行为差异由调用方处理）
-  for (const c of candidates) {
-    if (c && isLauncher(c) && fs.existsSync(c)) return c;
-  }
-  // 都不存在时返回第一个候选（调用方靠「文件不存在」判定未安装，给出可执行的提示）
-  return candidates[0] || '';
+/* ==================================================================== *
+ * 客户端可执行文件发现（2026-11-12 重写）
+ *
+ * 旧实现只认几个写死的候选目录，且注册表兜底用 `reg query /f /d` 搜数据——
+ * 该模式只输出命中的那一行，拿不到同键的 UninstallString/DisplayIcon，
+ * 再加上 reg.exe 在部分环境被安全策略禁用，于是「装在自选盘符」恒判未安装。
+ *
+ * 现在按可靠性分层探测，任何一层失败都不影响下一层：
+ *   1. config.json 里用户显式填的 app
+ *   2. 内置静态候选（跳过 Launcher 引导壳）
+ *   3. 盘符扫描：C:~Z: 的 Program Files / 根目录 × 品牌目录 × 主 exe（纯 fs，零外部依赖）
+ *   4. 系统快照：PowerShell 一次取回卸载项 + 运行中客户端的真实 exe 路径
+ *      （PowerShell 不可用时退回 reg.exe 全量 /s 分块解析）
+ *   5. Launcher 目录里 install.ini/state.ini 记的 installDir（要排除指向国际版的情形）
+ *   6. Launcher 兜底：只作为「存在但不是主程序」的诊断信息，绝不拿去开 CDP
+ *
+ * 国内版平台（qoder-cn / trae-cn）必须排除国际版安装：本机同时装有
+ * E:\Program Files\Qoder（0.5.5）与 E:\Program Files\Qoder CN（0.3.3），
+ * Launcher 的 ini 指向的是前者，误用会拉起没有签到活动的国际版。
+ * ==================================================================== */
+
+/** 平台 id → 发现规格。display 用于匹配卸载项/进程名，cnOnly 表示只认国内版目录 */
+const CLIENT_DISCOVERY = {
+  doubao: {
+    display: /豆包|doubao/i,
+    cnOnly: false,
+    dirNames: ['Doubao', '豆包', 'DoubaoWork'],
+    exeNames: ['Doubao.exe', 'DoubaoWork.exe'],
+    subDirs: ['app', 'Application', ''],
+  },
+  'trae-cn': {
+    display: /trae/i,
+    cnOnly: true,
+    dirNames: ['Trae CN', 'TraeCN'],
+    exeNames: ['Trae CN.exe', 'TraeCN.exe'],
+    subDirs: [''],
+  },
+  'qoder-cn': {
+    display: /qoder/i,
+    cnOnly: true,
+    dirNames: ['Qoder CN', 'QoderCN'],
+    exeNames: ['Qoder CN.exe', 'QoderCN.exe'],
+    subDirs: [''],
+  },
+};
+
+const isLauncherExe = (c) => /launcher/i.test(String(c || ''));
+const isServiceExe = (c) => /uninstall|setup|installer|launcher|update|elevate|crash|helper/i.test(String(c || ''));
+
+/** 系统快照：一次 PowerShell 拿到卸载项与运行中客户端路径，进程内缓存 5 分钟 */
+const EMPTY_SNAPSHOT = { uninstall: [], processes: [] };
+let SNAPSHOT = { at: 0, data: null };
+const SNAPSHOT_TTL_MS = 5 * 60_000;
+const SNAPSHOT_FAIL_TTL_MS = 30_000;
+
+function powershellCandidates() {
+  const sys = process.env.SystemRoot || 'C:\\Windows';
+  return ['powershell.exe', path.join(sys, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')];
 }
 
-/** 注册表 Uninstall 键缓存的安装路径（进程内缓存，注册表不常变） */
-const REGISTRY_EXE_CACHE = new Map();
+/**
+ * 用 -EncodedCommand 传脚本（UTF-16LE + base64），彻底绕开 -Command 的引号/转义地狱。
+ * 输出一个 JSON 对象 { uninstall: [...], processes: [...] }。
+ */
+function querySystemSnapshot() {
+  const script = [
+    // Windows PowerShell 5.1 默认按 OEM 代码页写 stdout，中文 DisplayName（如「豆包」）
+    // 被 Node 按 utf8 解码会变成替换字符，品牌匹配恒失败——先强制 UTF-8 输出
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    '$OutputEncoding = [System.Text.Encoding]::UTF8',
+    "$roots = @(",
+    " 'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',",
+    " 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',",
+    " 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'",
+    ')',
+    '$u = @(Get-ItemProperty -Path $roots -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName } | Select-Object DisplayName, DisplayIcon, InstallLocation, UninstallString)',
+    "$p = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -match 'Qoder|Doubao|Trae' } | Select-Object -ExpandProperty Path -Unique)",
+    '@{ uninstall = $u; processes = $p } | ConvertTo-Json -Compress -Depth 4',
+  ].join('\n');
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  const args = ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded];
+  for (const cmd of powershellCandidates()) {
+    try {
+      const out = execFileSync(cmd, args, { encoding: 'utf8', timeout: 20_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+      const parsed = JSON.parse(String(out || '').trim() || '{}');
+      const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+      return { uninstall: asArray(parsed.uninstall), processes: asArray(parsed.processes).filter((x) => typeof x === 'string') };
+    } catch (e) {
+      // 只有「找不到 powershell.exe」才值得换绝对路径重试；其它错误直接走 reg 备用
+      if (e?.code !== 'ENOENT') break;
+    }
+  }
+  return null;
+}
 
-/** 从注册表 Uninstall 键里找客户端主程序 exe：DisplayName 含平台名关键词即命中 */
-function findInstalledViaRegistry(id, name) {
-  const cacheKey = id;
-  if (REGISTRY_EXE_CACHE.has(cacheKey)) return REGISTRY_EXE_CACHE.get(cacheKey);
-  let result = '';
-  try {
-    // NSIS per-user 安装（UninstallString 带 /currentuser）写 HKCU，per-machine 写 HKLM；
-    // 两棵树都查（实测 Qoder 装在 E:\Program Files\Qoder CN\，键在 HKCU 下，HKLM 查不到）。
-    // /f 用平台名搜数据（搜 'DisplayName' 会 0 匹配——/f 是搜索词不是字段名）。
-    const term = String(name || id || '').split(/\s+/)[0] || '';
-    if (!term) return '';
-    // reg 的键路径分隔符用 path.join 拼（源码里写字面反斜杠经过 Git Bash/heredoc 多层
-    // 处理极易被吃——本函数曾因此安静失败，见 2026-11-12 Qoder 排查）
-    const regRoot = (...parts) => parts.join('\\');
-    // 两棵树各自独立查：「找到 0 匹配」时 reg 非零退出会让 execFileSync 抛错——
-    // 不能放在一个数组里连查，否则 HKLM 查不到时 HKCU 已拿到的结果整批报废
-    const out = ['HKCU', 'HKLM']
-      .map((root) => {
-        try {
-          return execFileSync('reg', ['query', regRoot(root, 'SOFTWARE', 'Microsoft', 'Windows', 'CurrentVersion', 'Uninstall'), '/s', '/f', term, '/d'], { timeout: 10_000, windowsHide: true, encoding: 'utf8' });
-        } catch {
-          return '';
-        }
-      })
-      .map((r) => String(r || ''))
-      .join('\n');
-    // 关键词：平台名去空格 + 平台 id 的非前缀部分（qoder-cn → qoder cn）
-    const kws = [...new Set([String(name || '').replace(/\s+/g, ''), String(id || '').split('-').join(' ')])].filter(Boolean).map((k) => k.toLowerCase());
-    // 从 DisplayName 行往后找同键的 DisplayIcon/InstallLocation（reg query /s /f 输出按键分块）
-    const lines = String(out).split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (!/DisplayName\s+REG_SZ/.test(line)) continue;
-      const display = line.split('REG_SZ')[1]?.trim() || '';
-      if (!kws.some((k) => display.toLowerCase().replace(/\s+/g, '').includes(k.replace(/\s+/g, '')))) continue;
-      // 同一个卸载键的块内找 DisplayIcon（通常指向主 exe 或同目录图标）
-      for (let j = i + 1; j < Math.min(i + 12, lines.length); j++) {
-        if (/^\s*HKEY_/ .test(lines[j])) break; // 进入下一个键的块
-        const icon = lines[j].match(/DisplayIcon\s+REG_SZ\s+(.+)/)?.[1]?.trim();
-        if (!icon) continue;
-        // DisplayIcon 可能带 ",0" 后缀（图标索引）；exe 必须真实存在才算数
-        const exePath = icon.split(',')[0].trim().replace(/^"|"$/g, '');
-        if (/\.exe$/i.test(exePath) && fs.existsSync(exePath)) {
-          result = exePath;
-          break;
-        }
-        // DisplayIcon 多数指向 uninstallerIcon.ico（卸载器图标），不是主程序——
-        // 用 DisplayName 的品牌词在图标同目录找主 exe（如 Qoder CN 0.3.3 → Qoder CN.exe）
-        if (exePath) {
-          const dir = path.dirname(exePath);
-          const brand = display.replace(/\s*v?[\d.]+\s*$/, '').trim(); // 去掉版本尾
-          // 组合候选：品牌原样（"Qoder CN"）、去空格（"QoderCN"）、id 尾段（cn→"Qoder CN.exe" 已含），
-          // 再叠加 CN 后缀变体——安装器主 exe 命名没有统一规律，多试几个
-          const brandVariants = [...new Set([brand, brand.replace(/\s+/g, '')])].filter(Boolean);
-          const brandWords = [...new Set([String(id || '').split('-').pop() || ''])].filter(Boolean);
-          const tried = new Set();
+/** PowerShell 不可用时的备用：reg query /s 全量输出，按 HKEY_ 分块解析整个卸载键 */
+function queryUninstallViaReg() {
+  const rows = [];
+  for (const root of ['HKCU', 'HKLM']) {
+    let out = '';
+    try {
+      const key = [root, 'SOFTWARE', 'Microsoft', 'Windows', 'CurrentVersion', 'Uninstall'].join('\\');
+      const buf = execFileSync('reg', ['query', key, '/s'], { encoding: 'buffer', timeout: 12_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+      // 中文 Windows 的 reg.exe 用本地代码页（GBK）输出，按 utf8 解会把「豆包」变乱码
+      const asUtf8 = buf.toString('utf8');
+      out = asUtf8.includes('\uFFFD') ? iconv.decode(buf, 'gbk') : asUtf8;
+    } catch {
+      continue;
+    }
+    let cur = null;
+    for (const line of String(out).split(/\r?\n/)) {
+      if (/^\s*HKEY_/i.test(line)) {
+        if (cur) rows.push(cur);
+        cur = {};
+        continue;
+      }
+      if (!cur) continue;
+      const m = line.match(/^\s*(DisplayName|DisplayIcon|InstallLocation|UninstallString)\s+REG_(?:SZ|EXPAND_SZ)\s+(.+)$/i);
+      if (m) cur[m[1]] = m[2].trim();
+    }
+    if (cur) rows.push(cur);
+  }
+  return { uninstall: rows.filter((r) => r.DisplayName), processes: [] };
+}
+
+function readSystemSnapshot() {
+  if (!isWindows) return EMPTY_SNAPSHOT;
+  const now = Date.now();
+  const ttl = SNAPSHOT.data ? SNAPSHOT_TTL_MS : SNAPSHOT_FAIL_TTL_MS;
+  if (SNAPSHOT.at && now - SNAPSHOT.at < ttl) return SNAPSHOT.data || EMPTY_SNAPSHOT;
+  const data = querySystemSnapshot() || queryUninstallViaReg();
+  const usable = data.uninstall.length > 0 || data.processes.length > 0;
+  SNAPSHOT = { at: now, data: usable ? data : null };
+  return usable ? data : EMPTY_SNAPSHOT;
+}
+
+/** 盘符扫描：不依赖注册表/PowerShell，覆盖 NSIS 自选盘符安装 */
+function scanDrives(spec) {
+  const roots = [];
+  for (let code = 67; code <= 90; code++) {
+    const drive = String.fromCharCode(code) + ':\\';
+    try {
+      if (!fs.existsSync(drive)) continue;
+    } catch {
+      continue;
+    }
+    roots.push(path.join(drive, 'Program Files'), path.join(drive, 'Program Files (x86)'), drive);
+  }
+  for (const root of roots) {
+    for (const dir of spec.dirNames) {
+      for (const sub of spec.subDirs) {
+        for (const name of spec.exeNames) {
+          const candidate = path.join(root, dir, sub, name);
           try {
-            for (const b of brandVariants) {
-              for (const cand of [`${b}.exe`, `${b}.exe`.toLowerCase()]) {
-                const p2 = path.join(dir, cand);
-                if (tried.has(p2.toLowerCase())) continue;
-                tried.add(p2.toLowerCase());
-                if (fs.existsSync(p2)) {
-                  result = p2;
-                  break;
-                }
-              }
-              if (result) break;
-            }
-            // 品牌词没命中：最后兜底，目录里最大的非 uninstall exe 通常就是主程序
-            if (!result) {
-              const entries = fs.readdirSync(dir).filter((f) => /\.exe$/i.test(f) && !/uninstall|setup|installer|elevate/i.test(f));
-              let best = null, bestSize = -1;
-              for (const f of entries) {
-                try {
-                  const sz = fs.statSync(path.join(dir, f)).size;
-                  if (sz > bestSize) { bestSize = sz; best = f; }
-                } catch { /* 忽略单个失败 */ }
-              }
-              if (best && bestSize > 50 * 1024 * 1024) result = path.join(dir, best); // 主程序至少几十 MB（Electron 壳排除）
-            }
+            if (fs.existsSync(candidate)) return candidate;
           } catch {
-            /* 目录读不到就算了 */
+            /* 单个路径不可读继续下一个 */
           }
         }
-        if (result) break;
       }
-      if (result) break;
     }
-  } catch (e) {
-    console.log("[registry][ERR]", String(e?.message || e).slice(0, 150));
   }
-  return result;
+  return '';
+}
+
+/** 从一条卸载记录推出可能的安装目录（UninstallString 最可靠，DisplayIcon 次之） */
+function dirsFromUninstall(row) {
+  const dirs = [];
+  const push = (v) => {
+    if (!v || typeof v !== 'string') return;
+    const clean = v.trim().replace(/^"|"$/g, '');
+    if (!clean || !/[\\/]/.test(clean)) return;
+    const dir = /\.exe$/i.test(clean) || /\.(ico|dll)$/i.test(clean) ? path.dirname(clean) : clean;
+    if (dir && dir !== '.') dirs.push(dir);
+  };
+  const quoted = String(row.UninstallString || '').match(/"([^"]+\.exe)"/i)?.[1];
+  push(quoted || String(row.UninstallString || '').split(/\s+\//)[0]);
+  push(String(row.DisplayIcon || '').split(',')[0]);
+  push(row.InstallLocation);
+  return [...new Set(dirs)];
+}
+
+/** 在安装目录里定位主 exe：品牌文件名 → 同目录同类 exe → 体积最大者 */
+function findMainExeInDir(dir, spec) {
+  const usable = (p) => {
+    try {
+      return fs.existsSync(p) && !isServiceExe(path.basename(p)) ? p : '';
+    } catch {
+      return '';
+    }
+  };
+  for (const sub of spec.subDirs) {
+    for (const name of spec.exeNames) {
+      const hit = usable(path.join(dir, sub, name));
+      if (hit) return hit;
+    }
+  }
+  try {
+    const files = fs.readdirSync(dir).filter((f) => /\.exe$/i.test(f) && !isServiceExe(f));
+    for (const f of files) {
+      if (spec.exeNames.some((n) => n.toLowerCase() === f.toLowerCase())) {
+        const hit = usable(path.join(dir, f));
+        if (hit) return hit;
+      }
+    }
+    let best = null;
+    let bestSize = 20 * 1024 * 1024; // Electron 主程序通常几十 MB，排除小工具壳
+    for (const f of files) {
+      try {
+        const size = fs.statSync(path.join(dir, f)).size;
+        if (size > bestSize) {
+          bestSize = size;
+          best = f;
+        }
+      } catch {
+        /* 忽略单个文件 */
+      }
+    }
+    if (best) return usable(path.join(dir, best));
+  } catch {
+    /* 目录不可读 */
+  }
+  return '';
+}
+
+/** Launcher 的 ini 会记真实安装目录；国内版平台必须拒绝指向国际版的目录 */
+function fromLauncherIni(candidates, spec) {
+  for (const c of candidates) {
+    if (!isLauncherExe(c)) continue;
+    const dir = path.dirname(c);
+    for (const ini of ['state.ini', 'install.ini']) {
+      let text = '';
+      try {
+        text = fs.readFileSync(path.join(dir, ini), 'utf8');
+      } catch {
+        continue;
+      }
+      const installDir = /^\s*installDir\s*=\s*(.+)$/im.exec(text)?.[1]?.trim();
+      const appExe = /^\s*appExecutable\s*=\s*(.+)$/im.exec(text)?.[1]?.trim();
+      if (!installDir || !appExe) continue;
+      if (spec.cnOnly && !/cn/i.test(installDir)) continue;
+      const candidate = path.join(installDir, appExe);
+      try {
+        if (fs.existsSync(candidate)) return candidate;
+      } catch {
+        /* 忽略 */
+      }
+    }
+  }
+  return '';
+}
+
+/** 探测结果缓存：命中且文件仍在就直接复用；未找到只缓存 60 秒，装好客户端后能自愈 */
+const PROBE_CACHE = new Map();
+const PROBE_TTL_MS = 60_000;
+
+/** 清空发现缓存（配置改了 app、或用户刚装完客户端想立刻重查时调用） */
+export function clearClientDiscoveryCache() {
+  PROBE_CACHE.clear();
+  SNAPSHOT = { at: 0, data: null };
+}
+
+/**
+ * 完整探测，返回 { exe, source, launcherOnly, tried }。
+ * source: config / static / drive-scan / running-process / registry / launcher-ini / launcher / none
+ * launcherOnly=true 表示只找到引导壳，不能拿去开 CDP。
+ */
+export function clientProbe(p, opts = {}) {
+  const key = `${p.id}|${p.app || ''}|${(p.appCandidates || []).join('|')}|${opts.skipDriveScan ? 'nodrive' : ''}`;
+  const cached = PROBE_CACHE.get(key);
+  if (cached && Date.now() - cached.at < PROBE_TTL_MS) {
+    if (!cached.probe.exe || fs.existsSync(cached.probe.exe)) return cached.probe;
+    PROBE_CACHE.delete(key);
+  }
+  const probe = probeClientNow(p, opts);
+  PROBE_CACHE.set(key, { at: Date.now(), probe });
+  return probe;
+}
+
+function probeClientNow(p, opts = {}) {
+  const spec = CLIENT_DISCOVERY[p.id] || {};
+  const candidates = [p.app, ...(Array.isArray(p.appCandidates) ? p.appCandidates : [])].filter(Boolean);
+  const tried = [];
+  const hit = (exe, source) => {
+    tried.push({ path: exe, source });
+    return { exe, source, launcherOnly: false, tried };
+  };
+
+  // 1) 用户显式配置
+  if (p.app) {
+    try {
+      if (fs.existsSync(p.app)) return hit(p.app, 'config');
+    } catch {
+      /* 路径不可读 */
+    }
+    tried.push({ path: p.app, source: 'config' });
+  }
+
+  // 2) 内置静态候选
+  for (const c of candidates) {
+    if (isLauncherExe(c)) continue;
+    try {
+      if (fs.existsSync(c)) return hit(c, 'static');
+    } catch {
+      /* 路径不可读 */
+    }
+  }
+
+  // 3) 盘符扫描（纯文件系统，最不容易被环境限制）
+  if (!opts.skipDriveScan && isWindows && spec.dirNames) {
+    const found = scanDrives(spec);
+    if (found) return hit(found, 'drive-scan');
+  }
+
+  // 4) 系统快照：先认正在运行的真实进程路径，再查卸载项推安装目录
+  if (isWindows && spec.display) {
+    const snap = readSystemSnapshot();
+    for (const proc of snap.processes) {
+      const file = String(proc);
+      if (!spec.display.test(path.basename(file))) continue;
+      if (spec.cnOnly && !/cn/i.test(file)) continue;
+      if (isServiceExe(path.basename(file))) continue;
+      try {
+        if (fs.existsSync(file)) return hit(file, 'running-process');
+      } catch {
+        /* 忽略 */
+      }
+    }
+    const rows = snap.uninstall.filter((r) => spec.display.test(String(r.DisplayName || '')));
+    const hasCn = rows.some((r) => /cn/i.test(String(r.DisplayName || '')));
+    const ordered = spec.cnOnly && hasCn ? [...rows].sort((a, b) => Number(/cn/i.test(String(b.DisplayName || ''))) - Number(/cn/i.test(String(a.DisplayName || '')))) : rows;
+    for (const row of ordered) {
+      if (spec.cnOnly && hasCn && !/cn/i.test(String(row.DisplayName || ''))) continue;
+      for (const dir of dirsFromUninstall(row)) {
+        if (spec.cnOnly && !/cn/i.test(dir)) continue;
+        const found = findMainExeInDir(dir, spec);
+        if (found) return hit(found, 'registry');
+      }
+    }
+  }
+
+  // 5) Launcher ini 反查
+  if (isWindows) {
+    const found = fromLauncherIni(candidates, spec);
+    if (found) return hit(found, 'launcher-ini');
+  }
+
+  // 6) 只剩 Launcher：保留路径供诊断，但标记成不可用于 CDP
+  for (const c of candidates) {
+    if (!isLauncherExe(c)) continue;
+    try {
+      if (fs.existsSync(c)) return { exe: c, source: 'launcher', launcherOnly: true, tried: [...tried, { path: c, source: 'launcher' }] };
+    } catch {
+      /* 忽略 */
+    }
+  }
+
+  return {
+    exe: '',
+    source: 'none',
+    launcherOnly: false,
+    tried: candidates.length ? candidates.map((c) => ({ path: c, source: 'candidate' })) : [],
+  };
+}
+
+/** 排障用：直接查看系统快照（卸载项与运行中客户端路径），不触发任何写操作 */
+export function debugSystemSnapshot() {
+  const s = readSystemSnapshot();
+  return { uninstallCount: s.uninstall.length, processes: s.processes };
+}
+
+/** 兼容旧调用方：只要可执行文件字符串 */
+export function resolveClientExe(p) {
+  return clientProbe(p).exe;
 }
 
 /** 客户端是否在本机运行（Windows 按 exe 名匹配进程，mac 按 pgrep） */

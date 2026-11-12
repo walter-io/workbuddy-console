@@ -18,7 +18,7 @@ import { lockFor, acquireContext, releaseContext } from './browser.mjs';
 import { resolvePlatforms, loadConfig, saveConfigAsync, appendResult, readResults, todayStr, shotDirForToday, pruneShots } from './store.mjs';
 import { runGenericWeb, dryRunWeb, runMinimax, runClientCheckin, clientInstalled, comateProbeRun } from './engines.mjs';
 import { snapshot, dumpHtml } from './dom.mjs';
-import { isClientRunning, MANUAL_PLATFORMS } from './registry.mjs';
+import { isClientRunning, clientProbe, MANUAL_PLATFORMS } from './registry.mjs';
 import { loginOkSince, markLoginOk } from './login.mjs';
 
 /** 单平台超时上限：客户端冷启动可能很慢（尤其早上刚唤醒的机器） */
@@ -148,7 +148,8 @@ export function pendingForAuto(list) {
   return list.filter((p) => {
     if (doneIds.has(p.id)) return false;
     const last = latestById.get(p.id);
-    if (last?.status === 'not_installed') return false;
+    // 历史「未安装」不再永久锁死：装好客户端后实时重探，命中即恢复自动补跑
+    if (last?.status === 'not_installed') return p.kind === 'client' && Boolean(clientInstalled(p));
     if (last?.status === 'needs_login' && loginOkSince(p.id) <= last.ts) return false;
     return true;
   });
@@ -166,6 +167,7 @@ export const STATUS_LABEL = {
   already: '今日已领',
   needs_login: '需登录',
   not_installed: '未安装',
+  stale_install: '待重跑',
   needs_manual: '需重启客户端',
   offline: '断网跳过',
   timeout: '超时',
@@ -497,6 +499,9 @@ export function buildNetCheckinState() {
   const dates = lastDates(14);
 
   const rows = platforms.map((p) => {
+    // 客户端安装状态必须实时探测：历史流水里的一条 not_installed 不能代表现状
+    const probe = p.kind === 'client' ? clientProbe(p) : null;
+    const installedNow = Boolean(probe?.exe && !probe.launcherOnly);
     const mine = results.filter((r) => r.id === p.id && !r.dryRun);
     mine.sort((a, b) => a.ts - b.ts);
     const last = mine[mine.length - 1] || null;
@@ -559,11 +564,18 @@ export function buildNetCheckinState() {
       visitClaim: Boolean(p.visitClaim),
       claimViaApp: Boolean(p.claimViaApp),
       appOnlyNote: p.appOnlyNote || '',
-      // 客户端类：装没装、跑没跑（进程扫描有开销，结果由路由层缓存）
-      clientExe: p.kind === 'client' ? clientInstalled(p) : '',
+      // 客户端类：实时探测（进程内缓存 60 秒），不依赖上一次运行留下的历史状态
+      clientExe: installedNow ? probe.exe : '',
+      clientExeSource: probe?.source || '',
+      clientLauncherOnly: Boolean(probe?.launcherOnly),
+      clientProbePaths: (probe?.tried || []).map((t) => t.path).filter(Boolean).slice(0, 6),
       clientRunning: false, // 由路由层填充
-      lastStatus: last?.status || null,
-      lastDetail: last?.detail || '',
+      // 历史「未安装」但现在已找到客户端：展示成「待重跑」，避免一直误导用户
+      lastStatus: last?.status === 'not_installed' && installedNow ? 'stale_install' : last?.status || null,
+      lastDetail:
+        last?.status === 'not_installed' && installedNow
+          ? `已检测到客户端 ${probe.exe}，下次运行会自动重试`
+          : last?.detail || '',
       lastTs: last?.ts || null,
       todayDone: doneTodayOf(p.id),
       streak,

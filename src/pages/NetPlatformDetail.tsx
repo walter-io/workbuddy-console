@@ -33,6 +33,7 @@ import {
   CATEGORY_META,
   RECORDS_PAGE_SIZE,
   STATUS_LABEL,
+  CLIENT_SOURCE_LABEL,
   avatarCls,
   matrixDotCls,
   statusDotCls,
@@ -338,9 +339,13 @@ export default function NetPlatformDetail({
                 p.clientExe ? (
                   <>
                     已安装（<span className="font-mono text-xs">{p.clientExe}</span>）· {p.clientRunning ? '运行中' : '未运行'}
+                    <span className="text-xs text-zinc-400"> · 发现方式：{CLIENT_SOURCE_LABEL[p.clientExeSource] || p.clientExeSource || '路径配置'}</span>
                   </>
                 ) : (
-                  '未安装'
+                  <span className="text-amber-600">
+                    未找到主程序{p.clientLauncherOnly ? '（只发现启动器/引导壳，无法接管）' : ''}
+                    {p.clientProbePaths?.length ? ` · 已排查 ${p.clientProbePaths.slice(0, 3).join('、')}` : ''}
+                  </span>
                 )
               ) : (
                 '—'

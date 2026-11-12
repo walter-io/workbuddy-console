@@ -28,7 +28,7 @@ import {
   dumpHtml,
   listVisibleButtons,
 } from './dom.mjs';
-import { resolveClientExe, isClientRunning, quitClientGracefully } from './registry.mjs';
+import { clientProbe, isClientRunning, quitClientGracefully } from './registry.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const firstLine = (s) => String(s ?? '').split('\n')[0];
@@ -459,20 +459,23 @@ async function cdpVersion(port) {
   }
 }
 
-/** 客户端是否存在：配置的显式路径和候选目录里找一个真实文件；都没有 → 未安装 */
+/** 客户端是否存在：走统一的多策略探测；只有引导壳不算（CDP 接管不了） */
 export function clientInstalled(platform) {
-  const exe = resolveClientExe(platform);
-  return exe && fs.existsSync(exe) ? exe : '';
+  const probe = clientProbe(platform);
+  return probe.exe && !probe.launcherOnly ? probe.exe : '';
 }
 
 export async function runClientCheckin(platform, { logger, shotDir, dryRun = false } = {}) {
-  const exe = clientInstalled(platform);
+  const probe = clientProbe(platform);
+  const exe = probe.exe && !probe.launcherOnly ? probe.exe : '';
   if (!exe) {
+    const places = [...new Set(probe.tried.map((t) => t.path).filter(Boolean))].slice(0, 3).join('、');
     return {
       status: 'not_installed',
-      detail: `本机没有找到 ${platform.name} 客户端，安装并登录后再启用这个平台。`,
+      detail: `没有找到 ${platform.name} 的主程序${probe.launcherOnly ? '（只发现启动器/引导壳，不能用于接管）' : ''}${places ? `；已排查 ${places} 等 ${probe.tried.length} 个位置` : ''}。若装在非默认目录，请在 ~/.free-token/checkin/config.json 的 platforms.${platform.id}.app 填入 exe 完整路径。`,
     };
   }
+  logger?.info?.(`${platform.name} 客户端：${exe}（来源 ${probe.source}）`);
 
   const port = platform.port;
   let launched = false;

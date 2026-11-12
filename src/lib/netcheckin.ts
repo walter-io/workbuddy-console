@@ -8,6 +8,7 @@ export type CheckStatus =
   | 'already'
   | 'needs_login'
   | 'not_installed'
+  | 'stale_install'
   | 'needs_manual'
   | 'offline'
   | 'timeout'
@@ -35,6 +36,12 @@ export interface NetPlatform {
   claimViaApp: boolean;
   appOnlyNote: string;
   clientExe: string;
+  /** 客户端主程序的发现方式，便于在详情页判断为什么找到/找不到 */
+  clientExeSource: string;
+  /** 只找到 Launcher 引导壳（不能开 CDP）时为 true */
+  clientLauncherOnly: boolean;
+  /** 本次排查过的前几个路径，未安装时给用户可操作的线索 */
+  clientProbePaths: string[];
   clientRunning: boolean;
   lastStatus: CheckStatus;
   lastDetail: string;
@@ -114,6 +121,7 @@ export const STATUS_LABEL: Record<string, string> = {
   already: '今日已领',
   needs_login: '登录失效',
   not_installed: '客户端未装',
+  stale_install: '待重跑',
   needs_manual: '待重启客户端',
   offline: '网络不通',
   timeout: '等待超时',
@@ -129,7 +137,7 @@ export const STATUS_LABEL: Record<string, string> = {
 export function statusTextCls(status: CheckStatus | string): string {
   if (status === 'success' || status === 'already') return 'text-teal-600';
   if (status === 'failed' || status === 'error' || status === 'timeout') return 'text-rose-600';
-  if (status === 'needs_login' || status === 'needs_manual' || status === 'not_found' || status === 'uncertain' || status === 'busy')
+  if (status === 'needs_login' || status === 'needs_manual' || status === 'not_found' || status === 'uncertain' || status === 'busy' || status === 'stale_install')
     return 'text-amber-600';
   return 'text-zinc-400';
 }
@@ -138,7 +146,7 @@ export function statusTextCls(status: CheckStatus | string): string {
 export function statusDotCls(status: CheckStatus | string): string {
   if (status === 'success' || status === 'already') return 'bg-teal-500';
   if (status === 'failed' || status === 'error' || status === 'timeout') return 'bg-rose-500';
-  if (status === 'needs_login' || status === 'needs_manual' || status === 'not_found' || status === 'uncertain' || status === 'busy')
+  if (status === 'needs_login' || status === 'needs_manual' || status === 'not_found' || status === 'uncertain' || status === 'busy' || status === 'stale_install')
     return 'bg-amber-500';
   return 'bg-zinc-300';
 }
@@ -191,3 +199,16 @@ export function matrixDotCls(status: CheckStatus | string): string {
   if (status === 'offline') return 'bg-zinc-300';
   return 'bg-zinc-200';
 }
+
+
+/** 客户端主程序的发现方式（详情页展示，便于判断为什么找到/找不到） */
+export const CLIENT_SOURCE_LABEL: Record<string, string> = {
+  config: '路径配置',
+  static: '内置候选路径',
+  'drive-scan': '盘符扫描',
+  'running-process': '运行中进程',
+  registry: '注册表卸载信息',
+  'launcher-ini': '启动器安装记录',
+  launcher: '仅启动器',
+  none: '未找到',
+};

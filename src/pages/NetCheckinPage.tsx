@@ -806,8 +806,12 @@ export default function NetCheckinPage() {
         return { p, why: p.kind === 'web' ? '登录已失效，需要重新授权一次' : '客户端登录已失效' };
       if (p.claimViaApp && p.lastStatus === 'not_found')
         return { p, why: p.appOnlyNote || '该平台需要下载客户端或在 App 内领取' };
-      if (p.kind === 'client' && p.enabled && p.lastStatus === 'not_installed')
-        return { p, why: '本机未安装该客户端，装好并登录后才能代领' };
+      if (p.kind === 'client' && p.enabled && p.lastStatus === 'not_installed' && !p.clientExe) {
+        const places = p.clientProbePaths?.length ? `（已排查 ${p.clientProbePaths.slice(0, 2).join('、')} 等位置）` : '';
+        return { p, why: `本机未找到该客户端主程序${places}，装好后在配置里填 exe 完整路径即可` };
+      }
+      if (p.kind === 'client' && p.enabled && p.lastStatus === 'stale_install')
+        return { p, why: '客户端已检测到，点一次「领取」重跑即可（自动补跑也会接手）' };
       return null;
     })
     .filter((x): x is { p: NetPlatform; why: string } => x !== null);
