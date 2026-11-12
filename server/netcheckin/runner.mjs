@@ -334,11 +334,11 @@ export async function runNetCheckin({ only = [], dryRun = false, source = 'manua
   if (runState.running) return { ok: false, busy: true, error: '已有一轮批量签到在运行，等它结束再试' };
   if (single && runState.activeIds.has(only[0])) return { ok: false, busy: true, error: '该平台正在执行中，等它结束再试' };
 
-  if (!single) {
-    runState.running = true;
-    runState.source = source;
-    runState.startedAt = Date.now();
-  }
+  // 单平台手动执行同样占住全局运行标记：否则启动自动补跑会在手动执行中途
+  // 并行抢同一个平台的浏览器锁，写出一条假的「浏览器忙」流水（2026-11-12 实测）
+  runState.running = true;
+  runState.source = source;
+  runState.startedAt = Date.now();
   runState.runId = (logBuffer.length ? logBuffer[logBuffer.length - 1].seq : 0) + 1;
   runEpoch.value++;
   const cfg = loadConfig();
@@ -403,7 +403,8 @@ export async function runNetCheckin({ only = [], dryRun = false, source = 'manua
           rec.ts = Date.now();
           results.push(rec);
           logResult(rec, p);
-          if (!dryRun) appendResult(rec);
+          // busy 只是「这次没抢到浏览器锁」，不是一次领取结果，别让它盖掉今日状态
+          if (!dryRun && rec.status !== 'busy') appendResult(rec);
           // 检测证明登录态有效：同步刷新登录记账。否则被「登录失效」暂停的平台
           // 即使检测通过也会一直被自动领取跳过（检测结果不入账，needs_login 记录盖不掉）
           if (rec.status === 'dry_run' && p.kind === 'web' && loginOkSince(p.id) <= rec.ts - 60_000) {
@@ -436,10 +437,8 @@ export async function runNetCheckin({ only = [], dryRun = false, source = 'manua
     pushLog('err', `本轮异常: ${firstLine(e?.message || e)}`);
     return { ok: false, error: firstLine(e?.message || e), results, summary: summarize(results) };
   } finally {
-    if (!single) {
-      runState.running = false;
-      runState.source = null;
-    }
+    runState.running = false;
+    runState.source = null;
     runEpoch.value++;
     // 记录本轮结果供前端行内回填：检测的结果在行上显示「检测结论」，
     // 正式运行会覆盖掉它（行内转回真实状态）

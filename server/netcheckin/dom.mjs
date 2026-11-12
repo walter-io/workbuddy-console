@@ -369,6 +369,156 @@ export async function openAndWait(page, url, logger, { settle = 1500 } = {}) {
 }
 
 /**
+ * 目标按钮「看得到但点不到」的检测。
+ *
+ * isVisible() 只管 CSS 可见性，不管上面压了多少层。运营弹窗/活动公告一盖，
+ * elementFromPoint 落在遮罩上，locator.click() 会一直等到超时——外面看起来
+ * 就是「找到了入口却没找到可点击的按钮」这类自相矛盾的报错。
+ * 这里直接问浏览器：按钮中心点到底落在哪个元素上？
+ */
+export async function elementCoverage(page, selector) {
+  return page
+    .evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return { exists: false, covered: false, hit: null, rect: null, label: '' };
+      const r = el.getBoundingClientRect();
+      const rect = { x: r.x, y: r.y, w: r.width, h: r.height, cx: r.x + r.width / 2, cy: r.y + r.height / 2 };
+      const st = getComputedStyle(el);
+      const hidden = st.display === 'none' || st.visibility === 'hidden' || r.width < 4 || r.height < 4;
+      const hit = document.elementFromPoint(rect.cx, rect.cy);
+      const owned = !!hit && (hit === el || el.contains(hit));
+      return {
+        exists: true,
+        covered: !hidden && !owned,
+        label: (el.getAttribute('aria-label') || (el.textContent || '').trim() || '').slice(0, 60),
+        disabled: !!el.disabled,
+        rect,
+        hit: hit
+          ? {
+              tag: hit.tagName,
+              cls: typeof hit.className === 'string' ? hit.className.slice(0, 120) : '',
+              aria: hit.getAttribute?.('aria-label') || '',
+              text: (hit.textContent || '').trim().slice(0, 80),
+            }
+          : null,
+      };
+    }, selector)
+    .catch((e) => ({
+      exists: false,
+      covered: false,
+      hit: null,
+      rect: null,
+      label: '',
+      error: String(e?.message || e).split('\n')[0].slice(0, 120),
+    }));
+}
+
+const UNBLOCK_MARK = 'data-wb-unblock-close';
+
+/**
+ * 在「遮住目标按钮的那一层」里找关闭控件并打标记。
+ * 必须限定在覆盖层内部：页面同时可能有「关闭签到」这类卡片按钮，
+ * 全局按「关闭」文案扫会先把签到面板本身关掉（2026-11-12 MiniMax 实测）。
+ */
+async function markBlockingCloseButton(page, selector) {
+  return page
+    .evaluate(
+      ({ sel, mark }) => {
+        const el = document.querySelector(sel);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+        if (!hit) return null;
+        // 从命中的遮罩往上找到铺满视口的那层 fixed/absolute 容器
+        let scope = hit;
+        let top = null;
+        while (scope && scope !== document.body && scope !== document.documentElement) {
+          const cs = getComputedStyle(scope);
+          const sr = scope.getBoundingClientRect();
+          if ((cs.position === 'fixed' || cs.position === 'absolute') && sr.width >= innerWidth * 0.6 && sr.height >= innerHeight * 0.6) top = scope;
+          scope = scope.parentElement;
+        }
+        if (!top) return null;
+        const isClose = (b) => {
+          const t = `${b.getAttribute?.('aria-label') || ''} ${b.getAttribute?.('title') || ''} ${(b.textContent || '').trim()}`;
+          if (!/关闭|close|跳过|我知道了|稍后再说/i.test(t)) return false;
+          if (/签到|signin|claim/i.test(t)) return false;
+          const br = b.getBoundingClientRect();
+          return br.width >= 8 && br.height >= 8;
+        };
+        const btn = [...top.querySelectorAll('button,[role="button"]')].find(isClose);
+        if (!btn) return { close: null, blocker: top.getAttribute?.('aria-label') || (top.textContent || '').trim().slice(0, 40) };
+        btn.setAttribute(mark, '1');
+        return { close: btn.getAttribute?.('aria-label') || (btn.textContent || '').trim() || '(关闭按钮)', blocker: top.getAttribute?.('aria-label') || '' };
+      },
+      { sel: selector, mark: UNBLOCK_MARK },
+    )
+    .catch(() => null);
+}
+
+/**
+ * 把挡在目标按钮前面的弹层清掉，每轮复检，直到真的能点到为止。
+ * 顺序：弹层内的关闭按钮 → Esc → 直接摘掉全屏遮罩 DOM（最后手段）。
+ * 返回 { covered, cleared, blocker, attempts } 供引擎写进失败原因里。
+ */
+export async function unblockElement(page, selector, logger, { maxRounds = 3 } = {}) {
+  const attempts = [];
+  let blocker = '';
+  let cov = await elementCoverage(page, selector);
+  if (!cov.exists || !cov.covered) return { covered: false, cleared: false, blocker, attempts, coverage: cov };
+  blocker = cov.hit?.aria || cov.hit?.text || cov.hit?.cls?.slice(0, 40) || '';
+
+  for (let i = 0; i < maxRounds && cov.covered; i++) {
+    let acted = false;
+    const found = await markBlockingCloseButton(page, selector);
+    if (found?.blocker) blocker = found.blocker;
+    if (found?.close) {
+      try {
+        await page.locator(`[${UNBLOCK_MARK}="1"]`).first().click({ timeout: 3000 });
+        attempts.push(`关闭弹层「${found.close}」`);
+        acted = true;
+      } catch (e) {
+        attempts.push(`关闭按钮点不动：${String(e?.message || e).split('\n')[0].slice(0, 70)}`);
+      } finally {
+        await page.evaluate((mark) => document.querySelectorAll(`[${mark}]`).forEach((el) => el.removeAttribute(mark)), UNBLOCK_MARK).catch(() => null);
+      }
+    }
+    if (!acted && i < maxRounds - 1) {
+      await page.keyboard.press('Escape').catch(() => null);
+      attempts.push('按 Esc');
+    }
+    // 最后一轮仍被挡：摘掉铺满视口的遮罩（只动覆盖层，不碰签到卡片）
+    if (!acted && i === maxRounds - 1) {
+      const removed = await page
+        .evaluate((sel) => {
+          const el = document.querySelector(sel);
+          if (!el) return 0;
+          const r = el.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+          let scope = hit;
+          let top = null;
+          while (scope && scope !== document.body && scope !== document.documentElement) {
+            const cs = getComputedStyle(scope);
+            const sr = scope.getBoundingClientRect();
+            if ((cs.position === 'fixed' || cs.position === 'absolute') && sr.width >= innerWidth * 0.6 && sr.height >= innerHeight * 0.6) top = scope;
+            scope = scope.parentElement;
+          }
+          if (!top || top.contains(el)) return 0;
+          top.remove();
+          return 1;
+        }, selector)
+        .catch(() => 0);
+      if (removed) attempts.push('移除全屏遮罩层');
+    }
+    await sleep(900);
+    cov = await elementCoverage(page, selector);
+  }
+  const cleared = !cov.covered;
+  logger?.step?.(cleared ? `遮挡已清除（${attempts.join('、') || '无需处理'}）` : `遮挡仍在：${blocker || '未知弹层'}`);
+  return { covered: !cleared, cleared, blocker, attempts, coverage: cov };
+}
+
+/**
  * 清掉挡在按钮前面的弹层与遮罩。
  * 实战里最常见的两类「假故障」：隐私协议/活动公告把签到按钮盖住、全屏遮罩让
  * 鼠标点击落在遮罩上。点掉的顺序把「取消/暂不」放最后，避免误取消真操作。
@@ -378,7 +528,9 @@ const OVERLAY_TEXTS = ['我知道了', '知道了', '我已知晓', '同意并�
 export async function closeOverlays(page, logger, { maxClicks = 2 } = {}) {
   let clicked = 0;
   for (let i = 0; i < maxClicks; i++) {
-    const cands = await findCandidateButtons(page, OVERLAY_TEXTS, { maxTextLen: 8 });
+    const cands = (await findCandidateButtons(page, OVERLAY_TEXTS, { maxTextLen: 8 }))
+      // 「关闭签到」「关闭领取面板」这类按钮属于目标本身，点了等于自己把入口关掉
+      .filter((c) => !/签到|签领|signin|claim|领取/i.test(`${c.text} ${c.cls}`));
     if (!cands.length) break;
     const c = cands[0];
     try {

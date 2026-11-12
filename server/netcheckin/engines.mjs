@@ -19,6 +19,8 @@ import { sigCheck } from './loginsig.mjs';
 import {
   pageVisibleText,
   pageVisibleTextDeep,
+  elementCoverage,
+  unblockElement,
   detectLoginWall,
   findCandidateButtons,
   findCandidateButtonsDeep,
@@ -364,6 +366,9 @@ async function openMinimaxAccountMenu(page, logger) {
   }
 }
 
+/** 按钮有稳定的 class 与 aria-label，别再靠 getByRole 的模糊正则去猜 */
+const MINIMAX_CLAIM_SELECTOR = 'button.signin-claim-button, button[aria-label^="签到得"]';
+
 export async function runMinimax(page, logger, { dryRun = false } = {}) {
   logger?.step?.(`打开 ${MINIMAX_HOME}`);
   await page.goto(MINIMAX_HOME, { waitUntil: 'domcontentloaded', timeout: 60_000 });
@@ -371,14 +376,14 @@ export async function runMinimax(page, logger, { dryRun = false } = {}) {
   await sleep(3000);
 
   // 登录判断只看登录弹窗特征（页面其它地方可能本来就有「登录」字样）
-  let text = await pageVisibleText(page);
+  let text = await pageVisibleTextDeep(page);
   if (/获取验证码|微信扫码登录|请输入您的手机号/.test(text)) {
     return { status: 'needs_login', detail: '登录已失效，点「登录」扫码重新进入一次' };
   }
 
   let hasPanel = false;
   for (let i = 0; i < 8; i++) {
-    text = await pageVisibleText(page);
+    text = await pageVisibleTextDeep(page);
     if (text.includes('签到得')) {
       hasPanel = true;
       break;
@@ -393,7 +398,7 @@ export async function runMinimax(page, logger, { dryRun = false } = {}) {
       await clickVisibleText(page, ['每日签到'], logger);
       await sleep(2500);
     }
-    text = await pageVisibleText(page);
+    text = await pageVisibleTextDeep(page);
 
     const doneInDialog = MINIMAX_DONE_TEXTS.find((k) => text.includes(k));
     if (doneInDialog) return { status: 'already', detail: `面板显示「${doneInDialog}」，今天已完成` };
@@ -402,40 +407,108 @@ export async function runMinimax(page, logger, { dryRun = false } = {}) {
     }
   }
 
-  if (dryRun) return { status: 'dry_run', detail: '已找到「每日签到」入口（未点击）' };
-
-  // 签到按钮文案形如「签到得 400」
-  let claimed = false;
-  try {
-    const btn = page.getByRole('button', { name: /^(签到|立即签到|签到得)/ }).first();
-    if (await btn.isVisible({ timeout: 2000 })) {
-      await btn.click({ timeout: 6000 });
-      claimed = true;
-      logger?.step?.('已按下「签到得 N」');
-    }
-  } catch {
-    /* 退回文本匹配 */
+  // 文案先出现、按钮晚挂载是常态；按真实元素等，而不是靠固定 sleep
+  let cov = await elementCoverage(page, MINIMAX_CLAIM_SELECTOR);
+  for (let i = 0; i < 8 && !cov.exists; i++) {
+    await sleep(1000);
+    cov = await elementCoverage(page, MINIMAX_CLAIM_SELECTOR);
   }
-  if (!claimed) claimed = await clickVisibleText(page, ['签到得'], logger);
-
-  await sleep(2500);
-  text = await pageVisibleText(page);
-
-  const success = ['签到成功', '领取成功'].find((k) => text.includes(k));
-  const doneAfter = MINIMAX_DONE_TEXTS.find((k) => text.includes(k));
-  const m = text.match(/\+(\d{2,5})\s*积分/);
-  const points = m ? Number(m[1]) : null;
-
-  if (success || doneAfter) {
-    const ok = Boolean(success) || claimed;
+  if (!cov.exists) {
+    text = await pageVisibleTextDeep(page);
+    const done = MINIMAX_DONE_TEXTS.find((k) => text.includes(k));
+    if (done) return { status: 'already', detail: `面板显示「${done}」，今天已完成` };
     return {
-      status: ok ? 'success' : 'already',
-      detail: points ? `领取成功，+${points} 积分` : ok ? '领取成功（页面已显示今日已完成）' : `页面显示「${doneAfter}」`,
-      meta: points ? { todayPoints: points } : undefined,
+      status: 'not_found',
+      detail: '签到面板在，但页面没有「签到得 N」按钮（可能今天已领或界面改版）',
+      meta: { pageText: text.slice(-180) },
     };
   }
-  if (!claimed) return { status: 'not_found', detail: '找到了入口但没找到可点击的领取按钮' };
-  return { status: 'uncertain', detail: '已点击领取，但页面上没有出现明确的成功提示' };
+
+  if (dryRun) {
+    return { status: 'dry_run', detail: `已找到「每日签到」入口（按钮「${cov.label || '签到得'}」，未点击）` };
+  }
+
+  // 2026-11-12 实测：MiniMax 会弹「H3 Image 首发上线」全屏引导层（z-index 9999），
+  // 签到按钮看得到、isVisible() 也为真，但 elementFromPoint 落在弹层上，
+  // locator.click() 一直等到超时 → 旧版报「找到了入口但没找到可点击的领取按钮」。
+  let unblock = null;
+  if (cov.covered) {
+    const hint = cov.hit?.aria || cov.hit?.text?.slice(0, 30) || cov.hit?.cls?.slice(0, 30) || '未知弹层';
+    logger?.step?.(`签到按钮被「${hint}」遮挡，先清弹层`);
+    unblock = await unblockElement(page, MINIMAX_CLAIM_SELECTOR, logger);
+    cov = unblock.coverage;
+  }
+
+  let claimed = false;
+  let clickErr = '';
+  try {
+    const btn = page.locator(MINIMAX_CLAIM_SELECTOR).first();
+    await btn.scrollIntoViewIfNeeded({ timeout: 2500 }).catch(() => null);
+    await btn.click({ trial: true, timeout: 3500 }); // 先确认真的点得到
+    await btn.click({ timeout: 6000 });
+    claimed = true;
+  } catch (e) {
+    clickErr = firstLine(e?.message || e).slice(0, 150);
+  }
+  if (!claimed) claimed = await clickVisibleText(page, ['签到得'], logger);
+  if (!claimed && cov.rect && !cov.covered) {
+    try {
+      await page.mouse.click(cov.rect.cx, cov.rect.cy);
+      claimed = true;
+      logger?.step?.('按坐标点击「签到得」');
+    } catch (e) {
+      clickErr += `；坐标点击也失败：${firstLine(e?.message || e).slice(0, 90)}`;
+    }
+  }
+  if (claimed) logger?.step?.('已按下「签到得 N」');
+
+  // 结果判定：toast 会消失，按钮变「今日已签到」才是持久证据。
+  // 两条线一起看，避免弹窗/iframe 里的提示读不到就误判成失败。
+  let success = '';
+  let doneAfter = '';
+  let points = null;
+  let post = { exists: false, label: '' };
+  let buttonChanged = false;
+  for (let i = 0; i < 6; i++) {
+    await sleep(1000);
+    text = await pageVisibleTextDeep(page);
+    success = ['签到成功', '领取成功', '已到账', '签到完成'].find((k) => text.includes(k)) || '';
+    doneAfter = MINIMAX_DONE_TEXTS.find((k) => text.includes(k)) || '';
+    const m = text.match(/[+＋]\s*(\d{2,5})\s*积分/) || text.match(/(?:获得|到账)\s*(\d{2,5})\s*积分/);
+    points = m ? Number(m[1]) : points;
+    post = await elementCoverage(page, MINIMAX_CLAIM_SELECTOR);
+    buttonChanged = !post.exists || !/签到得|立即签到/.test(post.label || '');
+    if (success || doneAfter || (claimed && buttonChanged)) break;
+  }
+  const outcome = readOutcome(text);
+  const confirmed = Boolean(success || doneAfter || (claimed && buttonChanged) || outcome.already);
+
+  if (confirmed) {
+    const status = claimed ? 'success' : 'already';
+    const detail = points
+      ? `领取成功，+${points} 积分`
+      : success
+        ? success
+        : doneAfter
+          ? `页面显示「${doneAfter}」，今天已完成`
+          : claimed
+            ? '领取成功（签到按钮已变为完成态）'
+            : '页面显示今日已完成';
+    return { status, detail, meta: points ? { todayPoints: points } : undefined };
+  }
+
+  if (!claimed) {
+    const reason = unblock?.covered
+      ? `「签到得」按钮被${unblock.blocker ? `「${unblock.blocker}」` : '运营弹窗'}挡住，尝试${unblock.attempts.join('、') || '关闭'}后仍点不到（可手动打开一次网页关掉公告再重试）`
+      : `按钮「${cov.label || '签到得'}」就在页面上，但点击失败${clickErr ? `（${clickErr}）` : ''}`;
+    logger?.warn?.(reason);
+    return { status: 'not_found', detail: reason, meta: { blocked: !!unblock?.covered } };
+  }
+
+  return {
+    status: 'uncertain',
+    detail: `已点击「签到得」，但没看到明确成功提示；页面片段：${text.slice(-120)}`,
+  };
 }
 
 /* ======================================================================
