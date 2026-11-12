@@ -11,6 +11,7 @@
  */
 
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -41,7 +42,21 @@ export const KNOWN_CLIENT_PATHS = {
         path.join(WIN_LOCAL, 'DoubaoWork', 'DoubaoWork.exe'),
       ],
   trae: isMacOS ? ['/Applications/Trae CN.app'] : [path.join(WIN_LOCAL, 'Programs', 'Trae CN', 'Trae CN.exe')],
-  qoder: isMacOS ? ['/Applications/Qoder.app'] : [path.join(WIN_LOCAL, 'Programs', 'Qoder', 'Qoder.exe')],
+  // Qoder 有两代安装布局：新版装到 LOCALAPPDATA\Qoder（启动器在 Qoder Launcher 子目录），
+  // NSIS 自定义目录安装常见于 Program Files / 自选盘符（exe 名 Qoder.exe 或 Qoder CN.exe）。
+  // 2026-11-12 用户实测：装在 E:\Program Files\Qoder CN\Qoder CN.exe 被判「未安装」——
+  // 候选列表只认一种布局漏的。Launcher 只是引导壳，真正的主程序是根目录的 Qoder*.exe。
+  qoder: isMacOS
+    ? ['/Applications/Qoder.app']
+    : [
+        path.join(WIN_LOCAL, 'Programs', 'Qoder', 'Qoder.exe'),
+        path.join(WIN_LOCAL, 'Qoder', 'Qoder.exe'),
+        path.join(WIN_PF, 'Qoder', 'Qoder.exe'),
+        path.join(WIN_PF, 'Qoder CN', 'Qoder CN.exe'),
+        path.join(WIN_PF86, 'Qoder', 'Qoder.exe'),
+        path.join(WIN_LOCAL, 'Qoder', 'Qoder Launcher', 'Qoder Launcher.exe'),
+        path.join(WIN_LOCAL, 'Qoder CN', 'Qoder CN Launcher', 'Qoder CN Launcher.exe'),
+      ],
 };
 
 /**
@@ -216,11 +231,124 @@ export function resolveClientExe(p) {
   const candidates = [];
   if (p.app) candidates.push(p.app);
   if (Array.isArray(p.appCandidates)) candidates.push(...p.appCandidates);
+  // Launcher 只是引导壳（改名/装更新用，非 Electron 主程序，CDP 接管不了）——
+  // 拆出来最后兜底：优先静态主程序候选，再注册表发现，最后才接受 Launcher
+  const isLauncher = (c) => /launcher/i.test(String(c || ''));
   for (const c of candidates) {
-    if (c && fs.existsSync(c)) return c;
+    if (c && !isLauncher(c) && fs.existsSync(c)) return c;
+  }
+  // 静态主程序候选全部落空：查注册表 Uninstall 键兜底。NSIS 安装器允许自选盘符
+  // （用户实测装在 E:\Program Files\Qoder CN\），任何环境变量路径都覆盖不到；
+  // 卸载键里的 DisplayIcon 一定指向真实安装目录。
+  // DisplayName 按平台名模糊匹配（qoder-cn → "Qoder CN"，豆包 → "豆包/Doubao"）。
+  if (isWindows) {
+    const found = findInstalledViaRegistry(p.id, p.name);
+    if (found) return found;
+  }
+  // Launcher 兜底（总比报「未安装」好——至少进程在，行为差异由调用方处理）
+  for (const c of candidates) {
+    if (c && isLauncher(c) && fs.existsSync(c)) return c;
   }
   // 都不存在时返回第一个候选（调用方靠「文件不存在」判定未安装，给出可执行的提示）
   return candidates[0] || '';
+}
+
+/** 注册表 Uninstall 键缓存的安装路径（进程内缓存，注册表不常变） */
+const REGISTRY_EXE_CACHE = new Map();
+
+/** 从注册表 Uninstall 键里找客户端主程序 exe：DisplayName 含平台名关键词即命中 */
+function findInstalledViaRegistry(id, name) {
+  const cacheKey = id;
+  if (REGISTRY_EXE_CACHE.has(cacheKey)) return REGISTRY_EXE_CACHE.get(cacheKey);
+  let result = '';
+  try {
+    // NSIS per-user 安装（UninstallString 带 /currentuser）写 HKCU，per-machine 写 HKLM；
+    // 两棵树都查（实测 Qoder 装在 E:\Program Files\Qoder CN\，键在 HKCU 下，HKLM 查不到）。
+    // /f 用平台名搜数据（搜 'DisplayName' 会 0 匹配——/f 是搜索词不是字段名）。
+    const term = String(name || id || '').split(/\s+/)[0] || '';
+    if (!term) return '';
+    // reg 的键路径分隔符用 path.join 拼（源码里写字面反斜杠经过 Git Bash/heredoc 多层
+    // 处理极易被吃——本函数曾因此安静失败，见 2026-11-12 Qoder 排查）
+    const regRoot = (...parts) => parts.join('\\');
+    // 两棵树各自独立查：「找到 0 匹配」时 reg 非零退出会让 execFileSync 抛错——
+    // 不能放在一个数组里连查，否则 HKLM 查不到时 HKCU 已拿到的结果整批报废
+    const out = ['HKCU', 'HKLM']
+      .map((root) => {
+        try {
+          return execFileSync('reg', ['query', regRoot(root, 'SOFTWARE', 'Microsoft', 'Windows', 'CurrentVersion', 'Uninstall'), '/s', '/f', term, '/d'], { timeout: 10_000, windowsHide: true, encoding: 'utf8' });
+        } catch {
+          return '';
+        }
+      })
+      .map((r) => String(r || ''))
+      .join('\n');
+    // 关键词：平台名去空格 + 平台 id 的非前缀部分（qoder-cn → qoder cn）
+    const kws = [...new Set([String(name || '').replace(/\s+/g, ''), String(id || '').split('-').join(' ')])].filter(Boolean).map((k) => k.toLowerCase());
+    // 从 DisplayName 行往后找同键的 DisplayIcon/InstallLocation（reg query /s /f 输出按键分块）
+    const lines = String(out).split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!/DisplayName\s+REG_SZ/.test(line)) continue;
+      const display = line.split('REG_SZ')[1]?.trim() || '';
+      if (!kws.some((k) => display.toLowerCase().replace(/\s+/g, '').includes(k.replace(/\s+/g, '')))) continue;
+      // 同一个卸载键的块内找 DisplayIcon（通常指向主 exe 或同目录图标）
+      for (let j = i + 1; j < Math.min(i + 12, lines.length); j++) {
+        if (/^\s*HKEY_/ .test(lines[j])) break; // 进入下一个键的块
+        const icon = lines[j].match(/DisplayIcon\s+REG_SZ\s+(.+)/)?.[1]?.trim();
+        if (!icon) continue;
+        // DisplayIcon 可能带 ",0" 后缀（图标索引）；exe 必须真实存在才算数
+        const exePath = icon.split(',')[0].trim().replace(/^"|"$/g, '');
+        if (/\.exe$/i.test(exePath) && fs.existsSync(exePath)) {
+          result = exePath;
+          break;
+        }
+        // DisplayIcon 多数指向 uninstallerIcon.ico（卸载器图标），不是主程序——
+        // 用 DisplayName 的品牌词在图标同目录找主 exe（如 Qoder CN 0.3.3 → Qoder CN.exe）
+        if (exePath) {
+          const dir = path.dirname(exePath);
+          const brand = display.replace(/\s*v?[\d.]+\s*$/, '').trim(); // 去掉版本尾
+          // 组合候选：品牌原样（"Qoder CN"）、去空格（"QoderCN"）、id 尾段（cn→"Qoder CN.exe" 已含），
+          // 再叠加 CN 后缀变体——安装器主 exe 命名没有统一规律，多试几个
+          const brandVariants = [...new Set([brand, brand.replace(/\s+/g, '')])].filter(Boolean);
+          const brandWords = [...new Set([String(id || '').split('-').pop() || ''])].filter(Boolean);
+          const tried = new Set();
+          try {
+            for (const b of brandVariants) {
+              for (const cand of [`${b}.exe`, `${b}.exe`.toLowerCase()]) {
+                const p2 = path.join(dir, cand);
+                if (tried.has(p2.toLowerCase())) continue;
+                tried.add(p2.toLowerCase());
+                if (fs.existsSync(p2)) {
+                  result = p2;
+                  break;
+                }
+              }
+              if (result) break;
+            }
+            // 品牌词没命中：最后兜底，目录里最大的非 uninstall exe 通常就是主程序
+            if (!result) {
+              const entries = fs.readdirSync(dir).filter((f) => /\.exe$/i.test(f) && !/uninstall|setup|installer|elevate/i.test(f));
+              let best = null, bestSize = -1;
+              for (const f of entries) {
+                try {
+                  const sz = fs.statSync(path.join(dir, f)).size;
+                  if (sz > bestSize) { bestSize = sz; best = f; }
+                } catch { /* 忽略单个失败 */ }
+              }
+              if (best && bestSize > 50 * 1024 * 1024) result = path.join(dir, best); // 主程序至少几十 MB（Electron 壳排除）
+            }
+          } catch {
+            /* 目录读不到就算了 */
+          }
+        }
+        if (result) break;
+      }
+      if (result) break;
+    }
+  } catch (e) {
+    console.log("[registry][ERR]", String(e?.message || e).slice(0, 150));
+  }
+  return result;
 }
 
 /** 客户端是否在本机运行（Windows 按 exe 名匹配进程，mac 按 pgrep） */
