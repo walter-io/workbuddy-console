@@ -173,6 +173,19 @@ export function anthropicToOpenAi(body = {}) {
   // Anthropic 用 stop_sequences，OpenAI 用 stop（两边都是 string | string[]）
   if (body.stop_sequences !== undefined) out.stop = body.stop_sequences;
 
+  // 推理控制：Anthropic 协议用 thinking 预算块（Claude Code / ZCode 发
+  // thinking: {type:'enabled', budget_tokens:N}）。上游是 OpenAI 风格，
+  // 翻译成 reasoning_effort：budget ≥ 16k → high，≥ 8k → medium，其余 low；
+  // thinking.type === 'disabled' 时发 low 压低思考。
+  // 之前这里把 thinking 当「上游不认的私货」整块丢弃——客户端开思考等于白开。
+  const th = body.thinking;
+  if (th && typeof th === 'object') {
+    const t = String(th.type || '').toLowerCase();
+    const budget = Number(th.budget_tokens) || 0;
+    if (t === 'disabled' || t === 'off' || t === 'none') out.reasoning_effort = 'low';
+    else if (t === 'enabled' || t === 'on') out.reasoning_effort = budget >= 16000 ? 'high' : budget >= 8000 ? 'medium' : 'low';
+  }
+
   return out;
 }
 

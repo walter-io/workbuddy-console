@@ -123,6 +123,13 @@ export function responsesToOpenAi(body = {}) {
   if (body.temperature !== undefined) out.temperature = body.temperature;
   if (body.top_p !== undefined) out.top_p = body.top_p;
   if (body.max_output_tokens !== undefined) out.max_tokens = body.max_output_tokens;
+
+  // 推理控制：Responses 协议用 reasoning: {effort: 'low|medium|high|xhigh', ...}
+  // （Codex CLI 的 reasoning 级别）。上游是 OpenAI 风格的顶层 reasoning_effort，
+  // 直接映射；summary 等其余子字段上游不认，丢弃。之前整块丢弃——Codex 调推理等级无效。
+  const eff = body.reasoning?.effort;
+  if (typeof eff === 'string' && eff) out.reasoning_effort = eff;
+
   return out;
 }
 

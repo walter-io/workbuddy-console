@@ -178,6 +178,19 @@ export function geminiToOpenAi(body = {}, model) {
   // 结构化输出：Gemini 用 responseMimeType，OpenAI 用 response_format
   if (gc.responseMimeType === 'application/json') out.response_format = { type: 'json_object' };
 
+  // 推理控制：Gemini 协议用 generationConfig.thinkingConfig（Gemini CLI 发
+  // thinkingBudget: 0 关思考 / >0 预算；thinkingLevel: 'low|medium|high'）。
+  // 上游是 OpenAI 风格，翻译成 reasoning_effort：budget ≥ 16k → high，
+  // ≥ 8k → medium，budget === 0 → low（压低思考），thinkingLevel 直接映射。
+  // 之前整块丢弃——Gemini CLI 的思考开关无效。
+  const tc = gc.thinkingConfig || {};
+  if (Number.isFinite(Number(tc.thinkingBudget))) {
+    const b = Number(tc.thinkingBudget);
+    out.reasoning_effort = b === 0 ? 'low' : b >= 16000 ? 'high' : b >= 8000 ? 'medium' : 'low';
+  } else if (typeof tc.thinkingLevel === 'string' && tc.thinkingLevel) {
+    out.reasoning_effort = tc.thinkingLevel;
+  }
+
   return out;
 }
 
