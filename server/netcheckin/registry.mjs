@@ -134,7 +134,7 @@ export const BUILTIN_PLATFORMS = [
     cdpMode: 'arg',
     clickSelectors: ['[class*="gift"]', '[class*="Gift"]', '[class*="check-in"]', '[class*="checkin"]'],
     keywords: ['领取', '签到', '立即领取'],
-    doneKeywords: ['已领取', '明天再来', '已签到'],
+    doneKeywords: ['已领取', '已经领过', '明日再来', '明天再来', '今日已领', '领取成功', '已签到'],
     notes: '需要先安装 Qoder 国内版并登录；领取入口在左下角用量面板的礼物图标。额度窗口是每天 10:00 到次日 10:00，错过不补。',
   },
   // 智谱清言（zhipu）：2026-11 移入 MANUAL_PLATFORMS（羊毛情报）。积分是登录自动到账、

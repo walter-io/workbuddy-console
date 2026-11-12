@@ -27,6 +27,34 @@ export async function pageVisibleText(page, limit = 20_000) {
   }
 }
 
+/** 单个 frame 的可见文本（iframe 里的活动弹窗用它） */
+export async function frameVisibleText(frame, limit = 20_000) {
+  try {
+    const t = await frame.evaluate(() => document.body?.innerText || '');
+    return String(t || '').slice(0, limit);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 主文档 + 所有可访问 iframe 的可见文本。
+ * Qoder/Trae 这类 Electron 客户端常把活动面板整块挂在 iframe 里，
+ * 只读 document.body.innerText 会既看不到成功提示、也看不到「已领取」，
+ * 甚至连「入口还在不在」都判断不了（主文档永远 0 个候选 → 恒判「入口已消失」）。
+ */
+export async function pageVisibleTextDeep(page, limit = 20_000) {
+  const parts = [];
+  const main = await pageVisibleText(page, limit);
+  if (main) parts.push(main);
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    const t = await frameVisibleText(frame, limit);
+    if (t) parts.push(t);
+  }
+  return parts.join('\n').slice(0, limit);
+}
+
 const LOGIN_URL_RE = /(login|signin|sign-in|passport|sso|oauth|authorize|account\/login)/i;
 const LOGIN_TEXT_RE =
   /(扫码登录|登录后|请先登录|手机号登录|验证码登录|账号登录|立即登录|登录\/注册|登录或注册|登录以同步|登录以使用|登录以查看|未登录)/;
@@ -94,86 +122,118 @@ export async function detectLoginWall(page, text) {
   return { needLogin: false, reason: '' };
 }
 
+
 /**
- * 找出页面上「像签到按钮」的候选元素（返回坐标，由外层真实点击）。
+ * 候选按钮扫描：主文档与 iframe 共用同一份逻辑。
+ * 作为 evaluate 回调传入，函数体必须自包含（不能引用外部闭包变量）。
+ * - exactOnly: 只保留「文本恰好等于关键词」的节点，避免点到
+ *   「每日 10:00 刷新，领取后 30 天有效」「活动权益以领取时的账户状态为准」这类说明文字。
+ * - mark: 给第一个命中元素打上属性，供 frame.locator() 做真实点击
+ *   （iframe 内的坐标是相对 frame 的，不能直接交给 page.mouse.click）。
  */
-export async function findCandidateButtons(page, keywords, { maxTextLen = 14 } = {}) {
-  const kw = keywords.map(norm).filter(Boolean);
-  if (!kw.length) return [];
+function scanCandidatesInDocument({ kw, maxTextLen = 14, exactOnly = false, mark = '' }) {
+  const norm = (s) => (s || '').replace(/[\s\u3000]+/g, '').trim();
+  const isVisible = (el) => {
+    const st = getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden' || st.visibility === 'collapse') return false;
+    if (parseFloat(st.opacity || '1') < 0.15) return false;
+    const r = el.getBoundingClientRect();
+    return r.width >= 8 && r.height >= 8;
+  };
 
-  return page.evaluate(
-    ({ kw, maxTextLen }) => {
-      const norm = (s) => (s || '').replace(/[\s\u3000]+/g, '').trim();
-      const hits = [];
-
-      const isVisible = (el) => {
-        const st = getComputedStyle(el);
-        if (st.display === 'none' || st.visibility === 'hidden' || st.visibility === 'collapse') return false;
-        if (parseFloat(st.opacity || '1') < 0.15) return false;
-        const r = el.getBoundingClientRect();
-        return r.width >= 8 && r.height >= 8;
-      };
-
-      const nodes = document.querySelectorAll(
-        'button,a,[role="button"],[role="link"],div,span,li,label,p,strong,em,b,section,article,img,svg',
-      );
-      for (const el of nodes) {
-        const tag = el.tagName;
-        if (tag === 'SCRIPT' || tag === 'STYLE') continue;
-
-        let text = norm(el.textContent);
-        if (!text && el.getAttribute) {
-          text = norm(el.getAttribute('aria-label') || el.getAttribute('title') || '');
-        }
-        if (!text || text.length > maxTextLen) continue;
-        if (!kw.some((k) => text.includes(k))) continue;
-        if (!isVisible(el)) continue;
-
-        hits.push({ el, text, tag, cls: typeof el.className === 'string' ? el.className : '' });
-      }
-
-      // 只保留最深的节点：命中元素的后代也命中时丢掉祖先（外层容器常常恰好
-      // 也含关键词，比如整张「每日签到+200额度」卡片，点它的中心点不到真按钮）
-      const covered = new Set();
-      for (const h of hits) {
-        let p = h.el.parentElement;
-        while (p && !covered.has(p)) {
-          covered.add(p);
-          p = p.parentElement;
-        }
-      }
-      const deepest = hits.filter((h) => !covered.has(h.el));
-
-      const out = [];
-      for (const h of deepest.slice(0, 12)) {
-        try {
-          h.el.scrollIntoView({ block: 'center', inline: 'center' });
-        } catch {
-          /* 滚不了就按原坐标点 */
-        }
-        const r = h.el.getBoundingClientRect();
-        out.push({
-          text: h.text,
-          tag: h.tag,
-          cls: h.cls.slice(0, 120),
-          x: Math.round(r.x + r.width / 2),
-          y: Math.round(r.y + r.height / 2),
-          w: Math.round(r.width),
-          h: Math.round(r.height),
-        });
-      }
-      return out;
-    },
-    { kw, maxTextLen },
+  const hits = [];
+  const nodes = document.querySelectorAll(
+    'button,a,[role="button"],[role="link"],div,span,li,label,p,strong,em,b,section,article,img,svg',
   );
+  for (const el of nodes) {
+    const tag = el.tagName;
+    if (tag === 'SCRIPT' || tag === 'STYLE') continue;
+    let text = norm(el.textContent);
+    if (!text && el.getAttribute) {
+      text = norm(el.getAttribute('aria-label') || el.getAttribute('title') || '');
+    }
+    if (!text || text.length > maxTextLen) continue;
+    if (!kw.some((k) => text.includes(k))) continue;
+    if (exactOnly && !kw.some((k) => text === k)) continue;
+    if (!isVisible(el)) continue;
+    hits.push({ el, text, tag, cls: typeof el.className === 'string' ? el.className : '' });
+  }
+
+  // 只留最深节点：外层容器常含同样的关键词，点它的中心点不到真按钮
+  const covered = new Set();
+  for (const h of hits) {
+    let p = h.el.parentElement;
+    while (p && !covered.has(p)) {
+      covered.add(p);
+      p = p.parentElement;
+    }
+  }
+  const deepest = hits.filter((h) => !covered.has(h.el));
+
+  const out = [];
+  for (const h of deepest.slice(0, 12)) {
+    try {
+      h.el.scrollIntoView({ block: 'center', inline: 'center' });
+    } catch {
+      /* 滚不了就按原坐标点 */
+    }
+    const r = h.el.getBoundingClientRect();
+    out.push({
+      text: h.text,
+      tag: h.tag,
+      cls: h.cls.slice(0, 120),
+      x: Math.round(r.x + r.width / 2),
+      y: Math.round(r.y + r.height / 2),
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+    });
+  }
+  if (mark && deepest.length) {
+    try {
+      deepest[0].el.setAttribute(mark, '1');
+    } catch {
+      /* 忽略 */
+    }
+  }
+  return out;
+}
+
+/** 找出页面上「像签到按钮」的候选元素（返回坐标，由外层真实点击）。 */
+export async function findCandidateButtons(page, keywords, { maxTextLen = 14 } = {}) {
+  const kw = keywords.map((s) => (s || '').replace(/[\s\u3000]+/g, '').trim()).filter(Boolean);
+  if (!kw.length) return [];
+  return page.evaluate(scanCandidatesInDocument, { kw, maxTextLen, exactOnly: false, mark: '' });
+}
+
+/** 主文档 + 所有 iframe 的候选按钮：点击后判断「入口是否还在」必须用它 */
+export async function findCandidateButtonsDeep(page, keywords, { maxTextLen = 14 } = {}) {
+  const kw = keywords.map((s) => (s || '').replace(/[\s\u3000]+/g, '').trim()).filter(Boolean);
+  if (!kw.length) return [];
+  const out = [];
+  try {
+    const main = await page.evaluate(scanCandidatesInDocument, { kw, maxTextLen, exactOnly: false, mark: '' });
+    out.push(...main.map((c) => ({ ...c, inFrame: false })));
+  } catch {
+    /* 主文档不可用继续看 iframe */
+  }
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    try {
+      const hits = await frame.evaluate(scanCandidatesInDocument, { kw, maxTextLen, exactOnly: false, mark: '' });
+      out.push(...hits.map((c) => ({ ...c, inFrame: true })));
+    } catch {
+      /* 跨域/已销毁的 frame 跳过 */
+    }
+  }
+  return out;
 }
 
 /** 全页面文本里扫「是否已签过 / 是否成功 / 是否失败」 */
 export function readOutcome(text) {
   const t = norm(text);
-  const already = /(今日已签到|今日已签|已经签到|已签到|已领取|今天已领|明天再来|明日再来|签到已完成|今日签到已完成)/.test(t);
+  const already = /(今日已签到|今日已签|已经签到|已签到|已领取|已经领过|已领过|今天已领|明天再来|明日再来|签到已完成|今日签到已完成)/.test(t);
   const success = /(签到成功|领取成功|签到完成|领取完成|获得|已到账|签到获得)/.test(t);
-  const fail = /(签到失败|领取失败|操作失败|系统繁忙|请稍后|网络异常|重复签到|已经领过)/.test(t);
+  const fail = /(签到失败|领取失败|操作失败|系统繁忙|请稍后|网络异常|重复签到)/.test(t);
   return { already, success, fail };
 }
 
@@ -249,22 +309,45 @@ export async function clickFirstCandidate(page, keywords, logger, { label = '' }
     }
   }
 
-  // 主文档没找到时到 iframe 里找一遍（有些签到组件挂在 iframe）
+  // 主文档没找到时到 iframe 里找（Qoder 的「每天领 100 Credits」弹窗整块挂在 iframe）。
+  // 旧写法 frame.getByText(/领取/).first() 命中的常是「领取后 30 天有效」这类说明文字，
+  // 点完毫无反应；这里改成「文本恰好等于关键词」+ 打标记 + frame.locator 真实点击。
+  const kwExact = keywords.map((s) => (s || '').replace(/[\s\u3000]+/g, '').trim()).filter(Boolean);
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
-    for (const k of keywords) {
-      try {
-        const loc = frame.getByText(new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))).first();
-        if (await loc.isVisible({ timeout: 800 })) {
-          await loc.click({ timeout: 3000 });
-          await sleep(1200);
-          const after = await pageVisibleText(page, 4000);
-          return { clicked: true, text: `[iframe] ${k}`, outcome: readOutcome(after), changed: true };
-        }
-      } catch {
-        /* 换下一个 */
-      }
+    const MARK = 'data-wb-checkin';
+    let hits = [];
+    try {
+      hits = await frame.evaluate(scanCandidatesInDocument, { kw: kwExact, maxTextLen: 14, exactOnly: true, mark: MARK });
+    } catch {
+      continue;
     }
+    if (!hits.length) continue;
+    const btn = hits[0];
+    const before = await frameVisibleText(frame, 4000);
+    try {
+      const loc = frame.locator(`[${MARK}="1"]`).first();
+      if (!(await loc.isVisible({ timeout: 1200 }))) continue;
+      logger?.step?.(`iframe 内命中按钮「${btn.text}」，点击`);
+      await loc.click({ timeout: 4000 });
+    } catch {
+      continue;
+    }
+    await sleep(1200);
+    const after = await frameVisibleText(frame, 4000);
+    const afterHits = await frame
+      .evaluate(scanCandidatesInDocument, { kw: kwExact, maxTextLen: 14, exactOnly: true, mark: '' })
+      .catch(() => []);
+    const mainAfter = await pageVisibleText(page, 4000);
+    return {
+      clicked: true,
+      text: `[iframe] ${btn.text}`,
+      outcome: readOutcome(`${after}\n${mainAfter}`),
+      changed: after !== before,
+      frameText: after,
+      entryGone: afterHits.length === 0,
+      inFrame: true,
+    };
   }
 
   return { clicked: false, text: null, outcome: readOutcome(await pageVisibleText(page, 4000)), changed: false, tried };

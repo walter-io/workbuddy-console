@@ -18,8 +18,10 @@ import { loadPlaywright } from './browser.mjs';
 import { sigCheck } from './loginsig.mjs';
 import {
   pageVisibleText,
+  pageVisibleTextDeep,
   detectLoginWall,
   findCandidateButtons,
+  findCandidateButtonsDeep,
   clickFirstCandidate,
   readOutcome,
   openAndWait,
@@ -590,8 +592,20 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
       }
     }
 
-    // 4) 先确认今天没签过，能不点就不点
-    let text = await pageVisibleText(page);
+    // 3.8) 客户端里的活动面板常挂在跨域 iframe，窗口注册进 CDP 后还要 6~10 秒才挂载
+    // （Qoder 实测：2.5s 时 frames=1、0 个候选；6s 时 gateway.qoder.com.cn 的
+    //  activity-iframe 才带着「领取」按钮出现）。固定 sleep 会漏掉入口，
+    // 这里轮询等「完成态文案 / 候选按钮」出现，最多 18 秒。
+    const settleUntil = Date.now() + 18_000;
+    while (Date.now() < settleUntil) {
+      const t = await pageVisibleTextDeep(page, 8000);
+      if (platform.doneKeywords.some((k) => t.includes(k))) break;
+      if ((await findCandidateButtonsDeep(page, platform.keywords)).length) break;
+      await sleep(1000);
+    }
+
+    // 4) 先确认今天没签过，能不点就不点（必须连 iframe 一起读，Qoder 的活动面板在 iframe 里）
+    let text = await pageVisibleTextDeep(page);
     const doneHit = platform.doneKeywords.find((k) => text.includes(k));
     if (doneHit) return { status: 'already', detail: `页面显示「${doneHit}」，今天已完成` };
     if (doneRuleHit(text, platform.doneRule)) {
@@ -599,7 +613,7 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     }
 
     if (dryRun) {
-      const cands = await findCandidateButtons(page, platform.keywords);
+      const cands = await findCandidateButtonsDeep(page, platform.keywords);
       let selHit = null;
       for (const sel of platform.clickSelectors) {
         try {
@@ -656,19 +670,28 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     if (out.fail) return { status: 'failed', detail: `点击「${res.text}」后出现失败提示` };
     if (res.clicked) {
       await sleep(1800);
-      const t2 = await pageVisibleText(page, 5000);
+      const t2 = await pageVisibleTextDeep(page, 5000);
       const o2 = readOutcome(t2);
       const doneHit2 = platform.doneKeywords.find((k) => t2.includes(k));
-      const stillThere = (await findCandidateButtons(page, platform.keywords)).length > 0;
+      const stillThere = (await findCandidateButtonsDeep(page, platform.keywords)).length > 0;
       const ruleDone = doneRuleHit(t2, platform.doneRule);
+      // iframe 场景必须以「同一 frame 内的精确按钮」判断入口是否还在。
+      // 旧逻辑只查主文档（永远 0 个候选），把「根本没点到」误报成「入口已消失」。
+      const entryGone = res.inFrame ? Boolean(res.entryGone) : !stillThere;
+      const snippet = String(res.frameText || t2).replace(/\s+/g, ' ').slice(0, 110);
 
-      // 最可信的判定：点完之后入口消失，且页面出现「已领取/已签到」类文案
-      if (!stillThere && (doneHit2 || ruleDone)) {
-        return { status: 'success', detail: `点击「${res.text}」后入口消失，页面${doneHit2 ? `显示「${doneHit2}」` : '已是完成状态'}` };
+      // 点击前（步骤 4）已排除完成态，这里的完成文案必然是本次点击带来的
+      if (doneHit2 || ruleDone) {
+        return { status: 'success', detail: `点击「${res.text}」后页面显示「${doneHit2 || '今日已完成'}」` };
       }
-      if (o2.success || o2.already) return { status: 'success', detail: `点击后页面提示${o2.success ? '成功' : '已完成'}` };
-      if (stillThere) return { status: 'uncertain', detail: `已点击「${res.text}」但入口仍在，可能点到了遮挡层` };
-      return { status: 'uncertain', detail: `已点击「${res.text}」，入口已消失但未能确认结果` };
+      if (o2.already) return { status: 'already', detail: `点击后提示已完成（${res.text}）` };
+      if (o2.success) return { status: 'success', detail: `点击「${res.text}」后出现成功提示` };
+      if (o2.fail) return { status: 'failed', detail: `点击后出现失败提示：${snippet}` };
+      if (!entryGone) {
+        return { status: 'uncertain', detail: `已点击「${res.text}」但入口仍在，可能点到了说明文字或遮挡层（页面片段：${snippet}）` };
+      }
+      // 点击前确认过按钮存在、点击后同一 frame 内消失且无失败提示 → 领取完成
+      return { status: 'success', detail: `点击「${res.text}」后领取入口消失且无失败提示，判定已完成（页面片段：${snippet}）` };
     }
     return { status: 'not_found', detail: `页面上没有命中关键词的按钮：${platform.keywords.join('/')}` };
   } catch (e) {
