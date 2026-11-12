@@ -11,6 +11,8 @@
  *
  * 增强：快照在每次成功查询后自动落盘（供离线兜底与"余额曲线"使用）。
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { proxyFetch } from '../proxy.mjs';
 import { variantOf, getVariant, officialNetHint } from './variant.mjs';
 import {
@@ -18,6 +20,7 @@ import {
   accountDisplayName,
   secretValue,
   findAccount,
+  STORE_DIR,
   CREDIT_SNAPSHOTS_FILE,
   OFFICIAL_USAGE_CACHE_FILE,
   readJsonFile,
@@ -716,6 +719,114 @@ export async function getAccountBalances({ refresh = false } = {}) {
   };
   balanceCache = { at: now, payload };
   return { ...payload, cached: false };
+}
+
+/* ---------------- 积分到期提醒 ----------------
+ * Buddy One 积分按套餐周期发放、周期结束清零不结转（2026-11 官方口径）。
+ * 用户月底才发现整池积分没用完就作废，损失最大——这里做两层：
+ * 1) /api/accounts/credit-expiry：汇总「每个账号最近到期的可用积分包」，前端角标/提醒条用；
+ * 2) 每日巡检（scheduleCreditExpiryCheck）：扫全部账号，到期窗口内的记进本地提醒档
+ *    （credit-expiry-notifications.json），按「账号+包+到期日」去重，同一天不重复提醒。
+ */
+
+/** 提醒窗口：N 天内到期的积分包要提醒（官方套餐周期按自然月，月末是高峰） */
+const EXPIRY_NOTIFY_DAYS = 3;
+/** 巡检间隔：12 小时（服务长期挂机也能当天发现） */
+const EXPIRY_CHECK_INTERVAL_MS = 12 * 3600 * 1000;
+/** 提醒档路径：本地 JSON，与快照同目录 */
+const EXPIRY_NOTIFY_FILE = path.join(STORE_DIR, 'credit-expiry-notifications.json');
+
+/** 读取已发出的提醒档（损坏按空处理） */
+function readExpiryNotified() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(EXPIRY_NOTIFY_FILE, 'utf8'));
+    return Array.isArray(arr) ? arr.filter((x) => typeof x?.key === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeExpiryNotified(keys) {
+  try {
+    await fs.promises.mkdir(STORE_DIR, { recursive: true });
+    await fs.promises.writeFile(EXPIRY_NOTIFY_FILE, JSON.stringify(keys.slice(-500), null, 2), 'utf8');
+  } catch {
+    /* 落盘失败只影响去重，下轮会重复提醒一次，可接受 */
+  }
+}
+
+/**
+ * 汇总各账号「即将到期」的可用积分包。
+ * 复用 getAccountBalances 的缓存（不额外打官方接口）；返回按到期时间升序的告警行。
+ */
+export async function getCreditExpirySummary() {
+  const balances = await getAccountBalances();
+  const now = Date.now();
+  const horizon = now + EXPIRY_NOTIFY_DAYS * 24 * 3600 * 1000;
+  const rows = [];
+  for (const acc of balances.accounts || []) {
+    const b = acc.balance;
+    if (!b) continue;
+    for (const p of b.packages || []) {
+      if ((p.remaining ?? 0) <= 0) continue; // 用完的包不作废也不提醒
+      if (p.expireAt == null) continue; // 长期有效不提醒
+      if (p.expireAt <= now) continue; // 已过期的由过期态展示，不在这里重复
+      if (p.expireAt > horizon) continue;
+      rows.push({
+        accountId: acc.accountId,
+        accountName: acc.accountName,
+        variant: acc.variant,
+        variantLabel: acc.variantLabel,
+        packageCode: p.packageCode,
+        name: p.name,
+        remaining: p.remaining,
+        expireAt: p.expireAt,
+        hoursLeft: Math.max(0, Math.round((p.expireAt - now) / 3600000)),
+      });
+    }
+  }
+  rows.sort((a, b) => a.expireAt - b.expireAt);
+  return { collectedAt: now, windowDays: EXPIRY_NOTIFY_DAYS, rows };
+}
+
+/**
+ * 每日巡检：到期窗口内的积分包记入提醒档（本地 JSON，通知中心读取展示）。
+ * 按 `accountId|packageCode|到期日(本地)` 去重——同一个包同一天只提醒一次。
+ * 巡检失败安静跳过（余额接口本身有缓存与错误兜底）。
+ */
+async function runCreditExpiryCheck() {
+  try {
+    const summary = await getCreditExpirySummary();
+    if (!summary.rows.length) return;
+    const seen = new Set(readExpiryNotified().map((x) => x.key));
+    const d = new Date();
+    const fresh = [];
+    for (const r of summary.rows) {
+      const dayKey = `${r.accountId}|${r.packageCode || r.name}|${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+      if (seen.has(dayKey)) continue;
+      seen.add(dayKey);
+      fresh.push({ key: dayKey, at: Date.now(), ...r });
+    }
+    if (fresh.length) {
+      await writeExpiryNotified([...readExpiryNotified().map((x) => ({ key: x.key, at: x.at })), ...fresh]);
+      console.log(`[credit-expiry] ${fresh.length} 个积分包将在 ${EXPIRY_NOTIFY_DAYS} 天内到期，已记入提醒`);
+    }
+  } catch (e) {
+    console.log(`[credit-expiry] 巡检失败（下轮重试）：${String(e?.message || e).slice(0, 80)}`);
+  }
+}
+
+/** 读取提醒档（前端通知中心/积分页提醒条用） */
+export function readCreditExpiryNotifications() {
+  return readExpiryNotified();
+}
+
+/** 启动后注册巡检：先延迟 90 秒（避开启动预热高峰），之后每 12 小时一轮 */
+export function scheduleCreditExpiryCheck() {
+  setTimeout(() => {
+    void runCreditExpiryCheck();
+    setInterval(runCreditExpiryCheck, EXPIRY_CHECK_INTERVAL_MS);
+  }, 90_000);
 }
 
 /* ---------------- 逐笔积分明细（官方客户端的「积分明细」弹窗） ---------------- */

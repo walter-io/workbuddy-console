@@ -45,6 +45,9 @@ import {
   getOfflineCreditProjection,
   getAccountBalances,
   getCreditDetails,
+  getCreditExpirySummary,
+  readCreditExpiryNotifications,
+  scheduleCreditExpiryCheck,
   // 提速版在 credit-stats 路由尾部调用了它（预热 7/90 天），但漏了 import：
   // 缺这行每次统计请求都会抛 ReferenceError（响应已发出，只在服务端日志里炸）
   prefetchCreditRanges,
@@ -1522,6 +1525,25 @@ app.get(
 );
 
 /**
+ * 积分到期提醒：各账号「N 天内到期」的可用积分包汇总（复用余额缓存，不额外打官方）。
+ * 服务端每 12 小时自动巡检一次并把新出现的到期包记入本地提醒档（按天去重）；
+ * 这个端点给前端角标/提醒条实时用。GET /api/accounts/credit-expiry/notifications 读提醒档。
+ */
+app.get(
+  '/api/accounts/credit-expiry',
+  wrap(async (req, res) => {
+    res.json(await getCreditExpirySummary());
+  })
+);
+
+app.get(
+  '/api/accounts/credit-expiry/notifications',
+  wrap(async (req, res) => {
+    res.json({ items: readCreditExpiryNotifications() });
+  })
+);
+
+/**
  * 单账号的逐笔积分明细（官方客户端「积分明细」弹窗的数据源）。
  * 进程内缓存 5 分钟；?refresh=1 强制重打官方接口。
  */
@@ -2119,6 +2141,8 @@ const onListening = () => {
   setTimeout(() => {
     probeAllModelLimits({ refresh: true }).catch(() => {});
   }, 4000);
+  // 积分到期巡检：90 秒后首跑 + 每 12 小时一轮（credits.mjs 的 scheduleCreditExpiryCheck）
+  scheduleCreditExpiryCheck();
   if (process.env.NO_OPEN !== '1') {
     const cmd =
       process.platform === 'win32'

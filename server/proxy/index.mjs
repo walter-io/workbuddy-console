@@ -47,6 +47,13 @@ const ALLOWED_FIELDS = [
   'presence_penalty',
   'seed',
   'user',
+  // 推理控制（DeepSeek harness / OpenAI o 系 / Codex 等 agent 客户端会带）：
+  // - reasoning_effort: low|medium|high|xhigh（harness 内置 DeepSeek 档位 off/low/high/max）
+  // - thinking: {type: enabled|disabled}（DeepSeek 官方 API 风格；harness 对 V4 系
+  //   在 effort 之外额外发这个字段控制思考开关）
+  // 上游对认不认的字段按模型自行裁决，透传即可；不认会回业务错误如实转给客户端
+  'reasoning_effort',
+  'thinking',
 ];
 
 const LOG_LIMIT = 200;

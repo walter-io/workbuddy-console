@@ -465,6 +465,10 @@ function AccountCard({
 
   const pkgs = usablePackages(balance).slice(0, 2);
   const pkgTotal = usablePackages(balance).length;
+  /** 最先到期的可用积分包（提醒用）：套餐积分月底清零不结转，快到期的要肉眼可见 */
+  const soonest = pkgs.find((p) => p.expireAt != null && (p.remaining ?? 0) > 0) || null;
+  const soonDays = soonest?.expireAt ? Math.ceil((soonest.expireAt - Date.now()) / 86400000) : null;
+  const soonWarn = soonest && soonDays != null && soonDays <= 3;
 
   return (
     <article
@@ -547,6 +551,23 @@ function AccountCard({
           >
             {balance ? `${pkgTotal} 个积分池` : '—'}
           </span>
+          {soonest?.expireAt != null && (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${
+                soonWarn
+                  ? 'bg-amber-100 text-amber-700'
+                  : 'bg-zinc-100 text-zinc-500'
+              }`}
+              title={
+                soonWarn
+                  ? `「${soonest.name}」剩 ${fmtCredits(soonest.remaining!)} 将在 ${fmtPkgExpiry(soonest.expireAt)} 过期清零——积分按周期发放、到期不结转，尽快用掉`
+                  : `最先到期的积分包：${soonest.name} ${fmtPkgExpiry(soonest.expireAt)} 到期`
+              }
+            >
+              {soonWarn && <IconWarning className="w-3 h-3 shrink-0" />}
+              {soonDays != null && soonDays >= 0 ? `${soonDays === 0 ? '今天' : soonDays + ' 天'}后到期` : '已到期'}
+            </span>
+          )}
           <div
             className="ml-auto flex items-center gap-1.5 text-xs text-zinc-400"
             title={

@@ -26,7 +26,7 @@ import {
 } from '../components/ui';
 import { get, TIMEOUT } from '../lib/api';
 import { fmtNumber, fmtRelative } from '../lib/format';
-import type { CreditRequestRow, CreditResponse } from '../lib/types';
+import type { CreditExpiryRow, CreditExpiryResponse, CreditRequestRow, CreditResponse } from '../lib/types';
 import {
   Area,
   AreaChart,
@@ -224,6 +224,17 @@ export default function CreditStatsPage() {
     load();
   }, [load]);
 
+  /* ---------------- 积分到期提醒（套餐积分按周期清零不结转） ---------------- */
+  const [expiry, setExpiry] = useState<CreditExpiryResponse | null>(null);
+  useEffect(() => {
+    // 失败安静跳过：提醒是增强功能，接口不可用时不打扰统计主流程
+    get<CreditExpiryResponse>('/api/accounts/credit-expiry', { timeoutMs: TIMEOUT.credits })
+      .then(setExpiry)
+      .catch(() => {});
+  }, []);
+  const expiryRows: CreditExpiryRow[] = expiry?.rows || [];
+  const expiryWindowDays = expiry?.windowDays || 3;
+
   const maxConsumed = useMemo(
     () => Math.max(0, ...(data?.accounts || []).map((a) => a.credit)),
     [data]
@@ -313,6 +324,27 @@ export default function CreditStatsPage() {
 
   return (
     <div className="relative space-y-5">
+      {/* 积分到期提醒条：套餐积分按周期清零不结转，快到期的要放在最显眼处 */}
+      {expiryRows.length > 0 && (
+        <div className="flex flex-wrap items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs leading-relaxed text-amber-800">
+          <IconClock className="w-3.5 h-3.5 shrink-0 mt-px text-amber-500" />
+          <div className="min-w-0 flex-1">
+            <b>
+              {expiryRows.length} 个积分包将在 {expiryWindowDays} 天内到期清零
+            </b>
+            （积分按套餐周期发放，到期不结转）：
+            <ul className="mt-1 list-disc pl-5">
+              {expiryRows.slice(0, 5).map((r) => (
+                <li key={r.accountId + String(r.packageCode) + String(r.expireAt)}>
+                  「{r.accountName}」{r.name} 剩 <b className="tabular-nums">{fmtNumber(r.remaining)}</b>
+                  ，{r.hoursLeft < 24 ? '今天' : Math.floor(r.hoursLeft / 24) + ' 天后'}过期
+                </li>
+              ))}
+            </ul>
+            {expiryRows.length > 5 && <div className="mt-0.5 text-amber-700">还有 {expiryRows.length - 5} 个，见各账号卡片角标</div>}
+          </div>
+        </div>
+      )}
       {/* 工具栏 */}
       <Toolbar>
         <Segmented

@@ -577,6 +577,25 @@ export interface AccountBalancesResponse {
   cached?: boolean;
 }
 
+/** 即将到期的可用积分包（/api/accounts/credit-expiry，提醒条与卡片角标用） */
+export interface CreditExpiryRow {
+  accountId: string;
+  accountName: string;
+  variant: string;
+  variantLabel: string;
+  packageCode: string | null;
+  name: string;
+  remaining: number;
+  expireAt: number;
+  hoursLeft: number;
+}
+
+export interface CreditExpiryResponse {
+  collectedAt: number;
+  windowDays: number;
+  rows: CreditExpiryRow[];
+}
+
 export interface WorkbuddyDetection {
   dir: string;
   source: 'override' | 'default' | 'scan';
