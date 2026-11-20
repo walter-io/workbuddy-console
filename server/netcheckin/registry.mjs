@@ -93,7 +93,6 @@ export const BUILTIN_PLATFORMS = [
     doneRule: { present: ['每日签到'], absent: ['立即签到'] },
     autoRestart: true,
     quitAppName: 'Doubao',
-    keepRunning: true,
     notes: '先装好豆包桌面版并登录，领取入口在左下角头像资料区的「免费用豆包」面板里。豆包没装在常规位置的话，把 exe 的完整路径填进 config.json 的 platforms.doubao.app。',
   },
   {
@@ -119,24 +118,12 @@ export const BUILTIN_PLATFORMS = [
     doneKeywords: ['已签到', '今日已签到', '明日再来', '今日已领'],
     notes: '需要先安装 Trae 国内版并登录（国际版没有此活动）；领取入口在左下角头像菜单，工具会临时接管客户端完成点击。',
   },
-  {
-    id: 'qoder-cn',
-    name: 'Qoder 国内版',
-    kind: 'client',
-    category: 'code',
-    engine: 'client-cdp',
-    defaultEnabled: false,
-    reward: '100 Credits/天',
-    app: KNOWN_CLIENT_PATHS.qoder[0],
-    appCandidates: KNOWN_CLIENT_PATHS.qoder,
-    homepage: 'https://qoder.com/',
-    port: 9224,
-    cdpMode: 'arg',
-    clickSelectors: ['[class*="gift"]', '[class*="Gift"]', '[class*="check-in"]', '[class*="checkin"]'],
-    keywords: ['领取', '签到', '立即领取'],
-    doneKeywords: ['已领取', '已经领过', '明日再来', '明天再来', '今日已领', '领取成功', '已签到'],
-    notes: '需要先安装 Qoder 国内版并登录；领取入口在左下角用量面板的礼物图标。额度窗口是每天 10:00 到次日 10:00，错过不补。',
-  },
+  // Qoder 国内版（qoder-cn）：2026-11-21 移入 MANUAL_PLATFORMS（羊毛情报）。客户端 0.5.x
+  // 改版后每日领取入口整体下架——11-19 起连续 9 天 not_found，实测新版客户端：
+  // Credits 标签只剩用量热力图、用量面板只剩「查看详情」（外跳系统浏览器）、
+  // 刷新页面抓不到任何 campaign/claim 接口流量。若活动恢复，旧的接管配置是：
+  // port 9224 / cdpMode arg / clickSelectors [class*="gift"] 等 / 入口在左下角用量面板。
+  // 用户配置里遗留的 platforms.qoder-cn / logins.qoder-cn 会被自动忽略，历史记录仍留在流水里。
   // 智谱清言（zhipu）：2026-11 移入 MANUAL_PLATFORMS（羊毛情报）。积分是登录自动到账、
   // 每日刷新的额度，没有值得维护的「代领」动作；zhipu-api 专用引擎与登录判定一并移除。
   // 用户配置里遗留的 platforms.zhipu / logins.zhipu 会被自动忽略，历史记录仍留在流水里。
@@ -154,6 +141,21 @@ export const BUILTIN_PLATFORMS = [
     keywords: ['每日签到', '签到'],
     doneKeywords: ['今日已签到', '已签到', '明天再来'],
     notes: '从账户菜单进入每日签到，登录一次后即可每天自动领取；积分 30 天内有效。',
+  },
+  {
+    id: 'modelscope',
+    name: '魔搭社区',
+    kind: 'web',
+    category: 'code',
+    engine: 'web',
+    defaultEnabled: false,
+    reward: '200 魔粒/天（绑定阿里云账号再 +50），可用于 API 推理与 AIGC 算力抵扣',
+    homepage: 'https://modelscope.cn/',
+    loginUrl: 'https://modelscope.cn/',
+    entryUrls: ['https://modelscope.cn/my/molic'],
+    keywords: ['领取', '签到', '立即领取', '每日登录'],
+    doneKeywords: ['已领取', '今日已领取', '明日再来', '明天再来', '已签到'],
+    notes: '每日登录在「赚魔粒」页领取魔粒（2026-11 调研：每日 200，绑阿里云 +50）；先点工具里的「登录」授权魔搭账号，再开开关。',
   },
   // 扣子（coze）：2026-11 移除。字节已公告企业版停止售卖、专业版停服（2027 年底全面停服），
   // 平台处于收缩期；个人版「登录送 60 积分、当日作废」价值低，不值得继续维护代领。
@@ -220,7 +222,6 @@ export function normalizePlatform(p) {
           menuOpenTexts: Array.isArray(p.menuOpenTexts) ? p.menuOpenTexts : [],
           autoRestart: Boolean(p.autoRestart),
           quitAppName: p.quitAppName || '',
-          keepRunning: Boolean(p.keepRunning),
           launchTimeoutMs: Number(p.launchTimeoutMs) || 60_000,
         }
       : {}),
@@ -623,7 +624,9 @@ export async function isClientRunning(exePath) {
   }
 }
 
-/** 温和地结束客户端进程：先普通关闭窗口，超时再强制（只在我们自己拉起时使用） */
+/** 温和地结束客户端进程：先普通关闭窗口，超时再强制，并等到进程表真的空了
+ *  （强杀指令发出后进程树还要几秒才拆完；不等干净就拉起新实例，会被
+ *  单实例锁转发给正在退出的旧进程然后秒退，调试端口永远开不出来——豆包实测必现） */
 export async function quitClientGracefully(exePath, { waitMs = 15_000 } = {}) {
   if (!exePath || !isWindows) return;
   try {
@@ -637,6 +640,12 @@ export async function quitClientGracefully(exePath, { waitMs = 15_000 } = {}) {
       await new Promise((r) => setTimeout(r, 500));
     }
     await promisify(execFile)('taskkill', ['/F', '/IM', name, '/T'], { timeout: 10_000 }).catch(() => null);
+    // 强杀后也要确认进程表干净：给内核拆进程树留时间，最多再等 10 秒
+    const killAt = Date.now();
+    while (Date.now() - killAt < 10_000) {
+      if (!(await isClientRunning(exePath))) return;
+      await new Promise((r) => setTimeout(r, 500));
+    }
   } catch {
     /* 结束失败不影响主流程 */
   }
@@ -650,6 +659,22 @@ export async function quitClientGracefully(exePath, { waitMs = 15_000 } = {}) {
  * 原因标签 why 要写清楚是哪种，用户据此决定要不要自己动手。
  */
 export const MANUAL_PLATFORMS = [
+  {
+    id: 'leonardo',
+    name: 'Leonardo AI',
+    category: 'art',
+    reward: '免费档每天自动补 150 fast tokens（24 小时重置，输出可商用）',
+    why: '额度每日自动到账、无需签到——自己打开 app.leonardo.ai 就有，不需要代领（境外站点，需代理环境）',
+    homepage: 'https://app.leonardo.ai',
+  },
+  {
+    id: 'poe',
+    name: 'Poe（Quora）',
+    category: 'chat',
+    reward: '免费档每天自动发放 compute points（可问 GPT/Claude/Grok 等多模型）',
+    why: '点数每日自动刷新、无需签到——用多少算多少（境外站点，需代理环境）',
+    homepage: 'https://poe.com',
+  },
   {
     id: 'wanxiang',
     name: '通义万相',
@@ -686,8 +711,8 @@ export const MANUAL_PLATFORMS = [
     id: 'hailuo',
     name: '海螺 AI',
     category: 'video',
-    reward: '新人 500 积分；曾有每日赠送（政策已调整）',
-    why: '每日赠送的规则不稳定，自动化没有稳定收益',
+    reward: '每日登录送 100 贝壳（约 3 个 6 秒视频，额度已缩水）',
+    why: '贝壳登录自动到账、无需签到——自己打开 hailuoai.com 就有，不需要代领（2026-11-21 复核：每日赠送仍在，只是额度缩水）',
     homepage: 'https://hailuoai.com',
   },
   {
@@ -726,8 +751,8 @@ export const MANUAL_PLATFORMS = [
     id: 'liblib',
     name: '哩布哩布',
     category: 'art',
-    reward: '每日免费 20 积分（打开官网自动到账）',
-    why: '积分打开官网即自动到账、没有领取按钮——自己打开网站就有，不需要代领',
+    reward: '免费版每日 300 点算力（登录后在积分明细页领取）',
+    why: '算力每日刷新——自己打开网站就有，不需要代领（2026-11-21 复核：免费档现为 300 点/日，与 LibTV 同账号通用）',
     homepage: 'https://www.liblib.art',
   },
   {
@@ -738,30 +763,9 @@ export const MANUAL_PLATFORMS = [
     why: '算力登录自动到账、无签到按钮——自己打开网站就有，不需要代领',
     homepage: 'https://tusiart.com',
   },
-  {
-    id: 'duiyou',
-    name: '堆友',
-    category: 'art',
-    reward: '疑似有签到领算力（未证实）',
-    why: '签到规则未证实，官网没有公开活动页——有羊毛的话需要自己蹲',
-    homepage: 'https://d.design',
-  },
-  {
-    id: 'huiwa',
-    name: '绘蛙',
-    category: 'art',
-    reward: '疑似有每日积分（未证实，用于电商 AI 商品图 / 模特）',
-    why: '签到规则未证实，站点有反爬无法验证——有羊毛的话需要自己蹲',
-    homepage: 'https://huiwa.cn',
-  },
-  {
-    id: 'qiyu',
-    name: '奇域 AI',
-    category: 'art',
-    reward: '疑似有签到领算力（未证实，中式审美 AI 绘画）',
-    why: '签到机制只有社区推测，无官方规则页——需要自己验证',
-    homepage: 'https://www.qiyai.com',
-  },
+  // 堆友 / 绘蛙 / 奇域 / 慧言AI：2026-11-21 清理移除。前三家「疑似有签到」挂了一个月
+  // 仍未证实（无情报价值）；慧言AI 的登记域名 huiyan.ai 已在挂牌出售，情报失真。
+  // 历史记录仍在 git 与流水里，若日后证实有羊毛可随时补回。
   {
     id: 'gaoding',
     name: '稿定设计',
@@ -817,14 +821,6 @@ export const MANUAL_PLATFORMS = [
     reward: '每天 48 小时免费转写额度（自动重置）+ 权益加油站签到/任务加时长',
     why: '免费额度每日自动重置；权益加油站的签到/口令活动在登录后的头像菜单里，无固定按钮不可靠',
     homepage: 'https://tingwu.aliyun.com',
-  },
-  {
-    id: 'huiyan',
-    name: '慧言 AI',
-    category: 'chat',
-    reward: '每日自动更新 30 积分（注册另送 100）',
-    why: '积分每日自动到账、无需签到——用多少算多少',
-    homepage: 'https://www.huiyan.ai',
   },
   {
     id: 'comate',

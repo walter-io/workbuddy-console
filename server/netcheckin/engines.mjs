@@ -522,7 +522,12 @@ export async function runMinimax(page, logger, { dryRun = false } = {}) {
  * 两个铁律：
  * - 启动客户端只能用环境变量或它认可的参数开调试端口，且必须剥掉
  *   ELECTRON_RUN_AS_NODE（否则 Electron 以纯 Node 模式启动、1 秒静默退出）；
- * - 客户端「正在运行但没开调试端口」时绝不强杀用户的窗口，返回 needs_manual。
+ * - 客户端「正在运行但没开调试端口」时绝不强杀用户正在用的窗口：
+ *   autoRestart 的平台先温和退出再带端口重启，否则返回 needs_manual。
+ *
+ * 收尾规则（2026-11-18 定版）：签到结束后按「谁开的谁关」——
+ * - 因签到拉起的客户端要关掉（是我们开的，不关就一直挂在后台）；
+ * - 用户本来就开着的绝不动（哪怕为了开调试端口重启过一次，签完也让它开着）。
  */
 
 async function cdpVersion(port) {
@@ -554,12 +559,15 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
 
   const port = platform.port;
   let launched = false;
+  /** 客户端在我们动手之前是否已经在运行（用户自己开着的）：决定签到结束后要不要关 */
+  let wasRunningOriginally = false;
 
   // 1) 端口已在监听 → 直接接管；否则按需拉起
   let version = await cdpVersion(port);
   if (!version) {
     const running = await isClientRunning(exe);
     if (running) {
+      wasRunningOriginally = true;
       if (!platform.autoRestart) {
         return {
           status: 'needs_manual',
@@ -582,24 +590,34 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     }
 
     logger?.info?.(`启动 ${platform.name}（调试端口 ${port}）`);
-    const child = spawn(exe, args, { detached: true, stdio: 'ignore', env });
-    // spawn 异步失败（权限/路径）只走下面的端口超时兜底，不能让整个服务崩掉
-    child.on('error', () => {});
-    child.unref();
-    launched = true;
+    // 冷启动竞态（豆包 2026-11-21 实测必现）：温和退出后旧进程树收尾要几秒，
+    // 新进程被单实例锁转发给正在退出的旧实例后秒退，端口永远等不到。
+    // 首轮超时且进程已不在时补拉一次；进程还在（端口真没开）就不白等第二轮。
+    for (let attempt = 1; attempt <= 2 && !version; attempt++) {
+      const child = spawn(exe, args, { detached: true, stdio: 'ignore', env });
+      // spawn 异步失败（权限/路径）只走下面的端口超时兜底，不能让整个服务崩掉
+      child.on('error', () => {});
+      child.unref();
+      launched = true;
 
-    const t0 = Date.now();
-    while (Date.now() - t0 < platform.launchTimeoutMs) {
-      version = await cdpVersion(port);
+      const t0 = Date.now();
+      while (Date.now() - t0 < platform.launchTimeoutMs) {
+        version = await cdpVersion(port);
+        if (version) break;
+        await sleep(1200);
+      }
       if (version) break;
-      await sleep(1200);
+      if (await isClientRunning(exe)) break;
+      logger?.warn?.(`第 ${attempt} 次拉起后调试端口未就绪且进程已退出，补拉一次`);
     }
     if (!version) {
-      if (launched) await quitClientGracefully(exe);
+      // 原本就在运行的客户端拉起失败也不关：签完保持「开着」的状态，交给用户自己处理
+      if (launched && !wasRunningOriginally) await quitClientGracefully(exe);
       return { status: 'error', detail: `客户端已拉起，调试端口 ${port} 却没有响应（等了 ${Math.round(platform.launchTimeoutMs / 1000)}s）` };
     }
     logger?.info?.(`CDP 就绪: ${version.Browser}`);
   } else {
+    wasRunningOriginally = true; // 端口已在监听 = 客户端本来就在跑
     logger?.step?.(`检测到调试端口 ${port} 已就绪，直接接管`);
   }
 
@@ -609,7 +627,7 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
   try {
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 20_000 });
   } catch (e) {
-    if (launched) await quitClientGracefully(exe);
+    if (launched && !wasRunningOriginally) await quitClientGracefully(exe);
     return { status: 'error', detail: `连接客户端失败: ${firstLine(e?.message || e)}` };
   }
 
@@ -776,7 +794,12 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     } catch {
       /* ignore */
     }
-    // 只断开 CDP；客户端是我们拉起来的才收尾，用户自己开着的绝不动
-    if (launched && !platform.keepRunning) await quitClientGracefully(exe);
+    // 收尾按「谁开的谁关」：因签到拉起的才关，用户本来开着的绝不动
+    // （为开调试端口重启过的也算用户开着的——签完保持运行，下次还能直接接管）
+    if (launched && !wasRunningOriginally) {
+      await quitClientGracefully(exe);
+    } else if (launched) {
+      logger?.info?.(`${platform.name} 原本就在运行，签到后保持运行不关闭`);
+    }
   }
 }

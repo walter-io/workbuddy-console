@@ -25,3 +25,6 @@ archive-state.json
 # AI Log Plugin 推荐忽略项
 .specstory/
 .ailog/
+
+# netcheckin 探测脚本的现场产物（截图/JSON dump），每次运行都会重写
+scripts/probe-out/
