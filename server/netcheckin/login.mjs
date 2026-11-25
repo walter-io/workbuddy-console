@@ -9,7 +9,7 @@
  * 会直接跳过本轮，所以登录不会被打断。
  */
 
-import { lockFor, acquireContext, releaseContext } from './browser.mjs';
+import { lockFor, acquireContext, releaseContext, persistSessionCookies } from './browser.mjs';
 import { pageVisibleText } from './dom.mjs';
 import { snapshotCookieNames, learnSig } from './loginsig.mjs';
 import { loadConfig, saveConfig, resolvePlatforms } from './store.mjs';
@@ -81,6 +81,50 @@ const DETECTORS = {
     const loginForm = /获取验证码|微信扫码登录|请输入您的手机号/.test(text);
     const logged = /每日签到|签到得|MiniMax\d+/.test(text);
     return { ok: !loginForm && logged, why: loginForm ? 'login-form' : logged ? 'user-ui' : 'unknown' };
+  },
+  // 魔搭：balance 接口 200 且有 data（data/Data 都认）= 已登录；页面出现「退出登录」也算
+  modelscope: async (page) => {
+    const text = await pageVisibleText(page, 6000).catch(() => '');
+    if (/退出登录/.test(text)) return { ok: true, why: '发现退出登录入口' };
+    const r = await page.evaluate(async () => {
+      try {
+        const res = await fetch('/openapi/v1/magicubes/balance', { credentials: 'include', headers: { Accept: 'application/json' } });
+        let json = null;
+        try { json = await res.json(); } catch { /* 忽略 */ }
+        return { status: res.status, json };
+      } catch {
+        return { status: -1, json: null };
+      }
+    }).catch(() => null);
+    const d = r?.json && (r.json.data !== undefined ? r.json.data : r.json.Data);
+    if (r?.status === 200 && d) return { ok: true, why: 'balance 接口返回 200 且有 data' };
+    return { ok: false, why: '未检测到魔搭登录态' };
+  },
+  // 百度搭子：loginBonusInfo 返回 200 且 code/message 不是未登录语义 = 已登录
+  dumate: async (page) => {
+    const cookies = await page.context().cookies('https://console.bce.baidu.com').catch(() => []);
+    const info0 = cookies.find((c) => c && c.name === 'bce-user-info');
+    const csrf = info0 ? String(info0.value || '').replace(/^['"]|['"]$/g, '') : '';
+    const r = await page.evaluate(async (csrf) => {
+      try {
+        const headers = { Accept: 'application/json' };
+        if (csrf) headers.csrftoken = csrf;
+        const res = await fetch('/api/dumate/points/loginBonusInfo', { credentials: 'include', headers });
+        let json = null;
+        try { json = await res.json(); } catch { /* 忽略 */ }
+        return { status: res.status, json };
+      } catch {
+        return { status: -1, json: null };
+      }
+    }, csrf).catch(() => null);
+    if (r?.status === 200 && r.json) {
+      const code = String(r.json.code ?? r.json.errorCode ?? r.json.errno ?? '');
+      const msg = String(r.json.message ?? r.json.msg ?? '');
+      if (!/not.?login|not.?logged|未登录|登录已失效|session.?expired/i.test(code + ' ' + msg)) {
+        return { ok: true, why: 'loginBonusInfo 返回 200' };
+      }
+    }
+    return { ok: false, why: '未检测到百度搭子登录态' };
   },
 };
 
@@ -246,6 +290,7 @@ export async function startLogin(platformId) {
        *  平台专属探测与通用文案判定作辅助——它们对慢渲染/悬停菜单都不可靠 */
       const hasNewCookies = async () => {
         const now = await snapshotCookieNames(ctx, platform).catch(() => []);
+        await persistSessionCookies(ctx).catch(() => 0);
         if (now.length) sessionLastNames = now;
         return now.some((n) => !sessionBeforeNames.includes(n));
       };

@@ -16,7 +16,7 @@
 import path from 'node:path';
 import { lockFor, acquireContext, releaseContext } from './browser.mjs';
 import { resolvePlatforms, loadConfig, saveConfigAsync, appendResult, readResults, todayStr, shotDirForToday, pruneShots } from './store.mjs';
-import { runGenericWeb, dryRunWeb, runMinimax, runClientCheckin, clientInstalled, comateProbeRun } from './engines.mjs';
+import { runGenericWeb, dryRunWeb, runMinimax, runModelscope, runDumate, runClientCheckin, runClientOpen, clientInstalled, comateProbeRun } from './engines.mjs';
 import { snapshot, dumpHtml } from './dom.mjs';
 import { isClientRunning, clientProbe, MANUAL_PLATFORMS } from './registry.mjs';
 import { loginOkSince, markLoginOk } from './login.mjs';
@@ -148,6 +148,8 @@ export function pendingForAuto(list) {
   return list.filter((p) => {
     if (doneIds.has(p.id)) return false;
     const last = latestById.get(p.id);
+    // client-open 一天只替用户打开一次客户端：今天已有正式记录就跳过，不每小时重开
+    if (p.engine === 'client-open' && last && ['uncertain', 'success', 'already'].includes(last.status)) return false;
     // 历史「未安装」不再永久锁死：装好客户端后实时重探，命中即恢复自动补跑
     if (last?.status === 'not_installed') return p.kind === 'client' && Boolean(clientInstalled(p));
     if (last?.status === 'needs_login' && loginOkSince(p.id) <= last.ts) return false;
@@ -158,7 +160,13 @@ export function pendingForAuto(list) {
 /** 今天是否所有启用平台都已完成（自动代领的幂等门禁） */
 export function allDoneToday() {
   const list = resolvePlatforms(loadConfig(), { includeDisabled: false });
-  return list.length > 0 && list.every((p) => doneTodayOf(p.id));
+  const today = todayStr();
+  const results = readResults();
+  return list.length > 0 && list.every((p) => {
+    // client-open 的 uncertain 就是它的正常结果：今天打开过客户端就算完成
+    if (p.engine === 'client-open' && results.some((r) => r.id === p.id && r.date === today && !r.dryRun && ['uncertain', 'success', 'already'].includes(r.status))) return true;
+    return doneTodayOf(p.id);
+  });
 }
 
 /** 运行记录里状态用中文展示（前端徽章用同一套词，两边对得上） */
@@ -169,6 +177,7 @@ export const STATUS_LABEL = {
   not_installed: '未安装',
   stale_install: '待重跑',
   needs_manual: '需重启客户端',
+  manual_only: '需在客户端/小程序领取',
   offline: '断网跳过',
   timeout: '超时',
   not_found: '没找到入口',
@@ -221,7 +230,40 @@ async function runOne(platform, { dryRun }) {
   const shotDir = shotDirForToday();
   const logger = makeLogger();
 
+  // 只能客户端/小程序领取的平台：不开浏览器，直接记一条 manual_only。
+  // 正式运行照常 appendResult（status 不是 busy），检测也返回同样的结果。
+  if (platform.engine === 'guide') {
+    return {
+      id: platform.id,
+      name: platform.name,
+      status: 'manual_only',
+      detail: platform.appOnlyNote || '',
+      url: platform.entryUrls?.[0] || '',
+      shot: null,
+      durationMs: Date.now() - started,
+      dryRun: !!dryRun,
+    };
+  }
+
   try {
+    if (platform.engine === 'client-open') {
+      // 只替用户打开客户端（不接管、不读登录态）：不占共享浏览器资源，也不截图
+      const result = await withTimeout(runClientOpen(platform, { logger, dryRun }), PLATFORM_TIMEOUT_MS, platform.name);
+      return {
+        id: platform.id,
+        name: platform.name,
+        status: result.status,
+        detail: result.detail || '',
+        url: result.url || '',
+        meta: result.meta || undefined,
+        candidates: result.candidates ? result.candidates.length : undefined,
+        buttons: result.buttons,
+        shot: null,
+        durationMs: Date.now() - started,
+        dryRun: !!dryRun,
+      };
+    }
+
     if (platform.engine === 'client-cdp') {
       // 桌面类平台走 CDP 接管客户端，不占共享浏览器资源，直接跑
       const result = await withTimeout(runClientCheckin(platform, { logger, shotDir, dryRun }), PLATFORM_TIMEOUT_MS, platform.name);
@@ -258,8 +300,11 @@ async function runOne(platform, { dryRun }) {
       if (platform.headed) pushLog('info', `${platform.name} 需要可见浏览器窗口，已弹出窗口执行（站点风控要求）`);
       const page = await ctx.newPage();
       let work;
-      // MiniMax 有自己的三步导航、Comate 检测走专用探测——其余平台用通用页面体检
-      if (dryRun) {
+      // MiniMax 有自己的三步导航、Comate 检测走专用探测——其余平台用通用页面体检；
+      // 魔搭/百度搭子走各自的接口引擎，领取与检测都传 dryRun 由引擎自己决定只读与否
+      if (platform.engine === 'modelscope-web') work = runModelscope(page, logger, { dryRun });
+      else if (platform.engine === 'dumate-web') work = runDumate(page, logger, { dryRun });
+      else if (dryRun) {
         work =
           platform.engine === 'minimax-web'
             ? runMinimax(page, logger, { dryRun: true })
@@ -464,6 +509,11 @@ function logResult(rec, platform) {
     pushLog('warn', `⚠ ${platform.name}：${note}`);
     return;
   }
+  // guide 平台只记一条说明：不算失败，也不按报错通知
+  if (rec.status === 'manual_only') {
+    pushLog('info', `· ${rec.name}：${STATUS_LABEL.manual_only}${rec.detail ? ' · ' + rec.detail : ''}`);
+    return;
+  }
   const okStatus = ['success', 'already', 'dry_run'].includes(rec.status);
   const label = STATUS_LABEL[rec.status] || rec.status;
   pushLog(okStatus ? 'ok' : 'warn', `${okStatus ? '✓' : '✗'} ${rec.name}：${label}${rec.detail ? ' · ' + rec.detail : ''}`);
@@ -485,9 +535,10 @@ function emptySummary() {
 }
 
 function summarize(results) {
+  const manual = results.filter((r) => r.status === 'manual_only').length;
   const done = results.filter((r) => r.status === 'success' || r.status === 'already' || r.status === 'dry_run').length;
-  const failed = results.filter((r) => !['success', 'already', 'dry_run'].includes(r.status)).length;
-  return { total: results.length, done, failed, skipped: 0 };
+  const failed = results.filter((r) => !['success', 'already', 'dry_run', 'manual_only'].includes(r.status)).length;
+  return { total: results.length, done, failed, skipped: manual };
 }
 
 /** 给前端的状态构建：平台清单 + 最近结果 + 14 天矩阵 + 连续天数 */
@@ -559,6 +610,7 @@ export function buildNetCheckinState() {
       notes: p.notes,
       homepage: p.homepage,
       loginUrl: p.loginUrl,
+      entryUrls: p.entryUrls,
       headed: Boolean(p.headed),
       visitClaim: Boolean(p.visitClaim),
       claimViaApp: Boolean(p.claimViaApp),

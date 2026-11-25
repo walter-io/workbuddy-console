@@ -10,6 +10,7 @@ export type CheckStatus =
   | 'not_installed'
   | 'stale_install'
   | 'needs_manual'
+  | 'manual_only'
   | 'offline'
   | 'timeout'
   | 'not_found'
@@ -30,6 +31,7 @@ export interface NetPlatform {
   reward: string;
   notes: string;
   homepage: string;
+  entryUrls?: string[];
   loginUrl: string;
   headed: boolean;
   visitClaim: boolean;
@@ -123,6 +125,7 @@ export const STATUS_LABEL: Record<string, string> = {
   not_installed: '客户端未装',
   stale_install: '待重跑',
   needs_manual: '待重启客户端',
+  manual_only: '需在客户端/小程序领取',
   offline: '网络不通',
   timeout: '等待超时',
   not_found: '入口未命中',
@@ -137,7 +140,7 @@ export const STATUS_LABEL: Record<string, string> = {
 export function statusTextCls(status: CheckStatus | string): string {
   if (status === 'success' || status === 'already') return 'text-teal-600';
   if (status === 'failed' || status === 'error' || status === 'timeout') return 'text-rose-600';
-  if (status === 'needs_login' || status === 'needs_manual' || status === 'not_found' || status === 'uncertain' || status === 'busy' || status === 'stale_install')
+  if (status === 'needs_login' || status === 'needs_manual' || status === 'manual_only' || status === 'not_found' || status === 'uncertain' || status === 'busy' || status === 'stale_install')
     return 'text-amber-600';
   return 'text-zinc-400';
 }
@@ -146,7 +149,7 @@ export function statusTextCls(status: CheckStatus | string): string {
 export function statusDotCls(status: CheckStatus | string): string {
   if (status === 'success' || status === 'already') return 'bg-teal-500';
   if (status === 'failed' || status === 'error' || status === 'timeout') return 'bg-rose-500';
-  if (status === 'needs_login' || status === 'needs_manual' || status === 'not_found' || status === 'uncertain' || status === 'busy' || status === 'stale_install')
+  if (status === 'needs_login' || status === 'needs_manual' || status === 'manual_only' || status === 'not_found' || status === 'uncertain' || status === 'busy' || status === 'stale_install')
     return 'bg-amber-500';
   return 'bg-zinc-300';
 }

@@ -10,6 +10,37 @@ import type { Guide } from '../lib/guides';
 
 export default function PageGuide({ guide, label = '使用指南' }: { guide: Guide; label?: string }) {
   const [open, setOpen] = useState(false);
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
+
+  const copyPrompt = async () => {
+    const text = guide.prompt?.text;
+    if (!text) return;
+    try {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.opacity = '0';
+        textarea.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(textarea);
+        try {
+          textarea.focus();
+          textarea.select();
+          if (!document.execCommand('copy')) throw new Error('copy failed');
+        } finally {
+          textarea.remove();
+        }
+      }
+      setCopyState('copied');
+      window.setTimeout(() => setCopyState('idle'), 2000);
+    } catch {
+      setCopyState('error');
+    }
+  };
+
   return (
     <>
       <Button size="sm" variant="primary" onClick={() => setOpen(true)} title={`查看${guide.title}`}>
@@ -47,6 +78,20 @@ export default function PageGuide({ guide, label = '使用指南' }: { guide: Gu
                   <li key={i}>{t}</li>
                 ))}
               </ul>
+            </div>
+          )}
+          {guide.prompt && (
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 px-3 py-2.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 text-xs font-medium text-indigo-700">{guide.prompt.title}</div>
+                <Button size="sm" className="shrink-0" onClick={copyPrompt}>
+                  {copyState === 'copied' ? '已复制 ✓' : copyState === 'error' ? '复制失败，请手动选中复制' : '复制'}
+                </Button>
+              </div>
+              {guide.prompt.desc && <div className="mt-1 text-xs leading-relaxed text-zinc-500">{guide.prompt.desc}</div>}
+              <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-zinc-200 bg-zinc-50 p-3 font-mono text-[11px] leading-relaxed text-zinc-600">
+                {guide.prompt.text}
+              </pre>
             </div>
           )}
         </div>

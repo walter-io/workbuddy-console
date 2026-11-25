@@ -104,9 +104,12 @@ function PlatformRow({
   onToggle: (id: string, enabled: boolean) => void;
   onLogin: (id: string) => void;
 }) {
+  const toast = useToast();
+  const isGuide = p.engine === 'guide';
+  const guideUrl = p.entryUrls?.[0] || p.homepage;
   // 需要登录按钮的情况：登录失效、检测发现失效，或从没登录过；
   // 登录成功后（runEpoch 推进）状态刷新，按钮立即消失
-  const showLogin = p.kind === 'web' && (p.enabled ? p.lastStatus === 'needs_login' || trial?.status === 'needs_login' || (!p.lastLoginAt && !p.lastTs) : false);
+  const showLogin = !isGuide && p.kind === 'web' && (p.enabled ? p.lastStatus === 'needs_login' || trial?.status === 'needs_login' || (!p.lastLoginAt && !p.lastTs) : false);
   const st = p.lastStatus ? STATUS_LABEL[p.lastStatus] || p.lastStatus : null;
 
   return (
@@ -130,7 +133,7 @@ function PlatformRow({
               {p.name}
             </button>
             <Badge color={CATEGORY_META[p.category]?.color || 'gray'}>{CATEGORY_META[p.category]?.label || p.category}</Badge>
-            <Badge color="gray">{p.kind === 'client' ? '桌面版' : '网页版'}</Badge>
+            <Badge color="gray">{p.engine === 'guide' ? '客户端/小程序' : p.kind === 'client' ? '桌面版' : '网页版'}</Badge>
             {p.todayDone && <Badge color="teal">今日已领</Badge>}
             {p.streak >= 2 && <Badge color="teal">连续 {p.streak} 天</Badge>}
             {active && (
@@ -218,17 +221,28 @@ function PlatformRow({
               重新登录
             </Button>
           )}
+          {!isGuide && (
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={active || p.kind === 'client'}
+              onClick={() => onTrial(p.id)}
+              title={p.kind === 'client' ? '桌面版平台的检测需要重启客户端接管，不做只读检测——直接用「领取」即可' : '只核对这一个平台的入口与登录态，不点击、不领取'}
+            >
+              检测
+            </Button>
+          )}
           <Button
             size="xs"
-            variant="ghost"
-            disabled={active || p.kind === 'client'}
-            onClick={() => onTrial(p.id)}
-            title={p.kind === 'client' ? '桌面版平台的检测需要重启客户端接管，不做只读检测——直接用「领取」即可' : '只核对这一个平台的入口与登录态，不点击、不领取'}
+            variant="subtle"
+            disabled={active || !p.enabled || (!isGuide && p.todayDone)}
+            onClick={() => {
+              if (isGuide) window.open(guideUrl, '_blank');
+              onRun(p.id);
+              if (isGuide) toast('warn', p.appOnlyNote);
+            }}
           >
-            检测
-          </Button>
-          <Button size="xs" variant="subtle" disabled={active || !p.enabled || p.todayDone} onClick={() => onRun(p.id)}>
-            {p.todayDone ? '已领取' : '领取'}
+            {!isGuide && p.todayDone ? '已领取' : '领取'}
           </Button>
           <Switch checked={pendingEnabled ?? p.enabled} disabled={toggling} onChange={(v) => onToggle(p.id, v)} title="开启后参与自动领取与一键执行" className="ml-1" />
         </div>
@@ -633,7 +647,7 @@ export default function NetCheckinPage() {
           }
           // 需要下载客户端才能领的平台：入口未命中时大声提醒
           for (const p of s.platforms) {
-            if (p.claimViaApp && p.lastStatus === 'not_found' && !appWarned.current.has(p.id)) {
+            if (p.claimViaApp && (p.lastStatus === 'not_found' || p.lastStatus === 'manual_only') && !appWarned.current.has(p.id)) {
               appWarned.current.add(p.id);
               toast('warn', `${p.name}：${p.appOnlyNote || '该平台需要下载客户端或在 App 内领取'}`);
             }

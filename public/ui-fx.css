@@ -1,0 +1,152 @@
+/* ============================================================
+   WorkBuddy Console UI 特效层 r2
+   ① 液态玻璃胶囊 ② 聚光 ③ 边缘流光 ④ 点击展开 ⑤ 玻璃停靠栏
+   ⑥ 数据唤醒 ⑦ 模块拖拽 ⑧ 骨架屏 ⑨ Cover Flow ⑩ 粘性融合
+   纯装饰层：不改业务 DOM、不影响升级（升级后重放本文件 + ui-fx.js + index.html 两行）
+   ============================================================ */
+@property --fx-beam-angle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
+
+:root {
+  --fx-accent: #6366f1;
+  --fx-accent-2: #8b5cf6;
+  --fx-ease-spring: cubic-bezier(.34,1.56,.64,1);
+  --fx-ease-out: cubic-bezier(.22,.61,.36,1);
+  /* 审查 R005-8：装饰层统一收敛在 2000-2400 区间，不与业务浮层争高层 */
+  --fx-z-dock: 2000;
+  --fx-z-sk: 1900;
+  --fx-z-expand: 2300;
+  --fx-z-cf: 2200;
+}
+
+/* ---------- ①+⑩ 侧栏液态玻璃胶囊 & 粘性融合 ---------- */
+aside .fx-pill {
+  position: absolute;
+  left: 0; width: 100%;
+  border-radius: 12px;
+  background: linear-gradient(160deg, rgba(99,102,241,.14), rgba(139,92,246,.10));
+  border: 1px solid rgba(99,102,241,.28);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.5),
+    inset 0 -1px 0 rgba(255,255,255,.2),
+    0 6px 18px rgba(99,102,241,.18);
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+  transition: none;
+  z-index: 0;
+}
+aside nav { position: relative !important; }
+aside nav > button { position: relative; z-index: 1; }
+aside .fx-goo-bridge {
+  position: absolute;
+  background: linear-gradient(160deg, rgba(99,102,241,.14), rgba(139,92,246,.10));
+  border: 1px solid rgba(99,102,241,.28);
+  border-radius: 10px;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 0;
+}
+
+/* ---------- ② 聚光卡 ---------- */
+main .fx-spot { position: relative; transform-style: preserve-3d; will-change: transform; }
+main .fx-spot::before {
+  content: '';
+  position: absolute; inset: 0; border-radius: inherit;
+  background: radial-gradient(240px circle at var(--fx-mx,50%) var(--fx-my,50%), rgba(99,102,241,.10), transparent 65%);
+  opacity: 0; transition: opacity .4s; pointer-events: none; z-index: 0;
+}
+main .fx-spot::after {
+  content: '';
+  position: absolute; inset: -1px; border-radius: inherit; padding: 1px;
+  background: radial-gradient(200px circle at var(--fx-mx,50%) var(--fx-my,50%), rgba(99,102,241,.55), transparent 60%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  opacity: 0; transition: opacity .4s; pointer-events: none; z-index: 2;
+}
+main .fx-spot:hover::before, main .fx-spot:hover::after { opacity: 1; }
+main .fx-spot:hover { transition: transform .08s linear; }
+main .fx-spot > * { position: relative; z-index: 1; }
+
+/* ---------- ③ 边缘流光 ---------- */
+.fx-beam { position: relative; }
+.fx-beam::before {
+  content: '';
+  position: absolute; inset: -1px; border-radius: inherit; padding: 1.2px;
+  background: conic-gradient(from var(--fx-beam-angle),
+    transparent 0deg, transparent 275deg,
+    rgba(99,102,241,.9) 325deg, #c7d2fe 352deg, rgba(196,181,253,.9) 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: fxBeamSpin 3.4s linear infinite;
+  pointer-events: none;
+  z-index: 3;
+}
+@keyframes fxBeamSpin { to { --fx-beam-angle: 360deg; } }
+
+/* ---------- ④ 点击展开 ---------- */
+#fx-expand-layer {
+  position: fixed; inset: 0; z-index: var(--fx-z-expand);
+  background: rgba(15,23,42,.45);
+  backdrop-filter: blur(4px);
+  transition: opacity .28s;
+}
+#fx-expand-layer.fx-hiding { opacity: 0; }
+#fx-expand-detail {
+  position: fixed; z-index: calc(var(--fx-z-expand) + 1);
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 30px 80px rgba(15,23,42,.28);
+  overflow: hidden;
+}
+
+/* ⑤ dock：已移除 */
+/* ---------- ⑧ 骨架屏（R005-7：left 跟随侧栏变量，不再写死） ---------- */
+#fx-skeleton {
+  position: fixed; left: calc(var(--fx-sidebar-w, 224px) + 20px); top: 70px; right: 22px;
+  z-index: var(--fx-z-sk);
+  display: flex; flex-direction: column; gap: 12px;
+  pointer-events: none;
+  transition: opacity .35s;
+}
+#fx-skeleton.fx-fade { opacity: 0; }
+.fx-sk-card {
+  background: #fff; border: 1px solid rgba(15,23,42,.08);
+  border-radius: 16px; padding: 16px 18px;
+  display: flex; align-items: center; gap: 14px;
+  position: relative; overflow: hidden;
+  box-shadow: 0 1px 2px rgba(15,23,42,.03), 0 10px 28px rgba(15,23,42,.035);
+}
+.fx-sk-avatar { width: 40px; height: 40px; border-radius: 50%; background: rgba(15,23,42,.06); flex-shrink: 0; }
+.fx-sk-lines { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.fx-sk-bar { height: 11px; border-radius: 6px; background: rgba(15,23,42,.06); }
+.fx-sk-bar.b1 { width: 38%; } .fx-sk-bar.b2 { width: 62%; }
+.fx-sk-block { width: 88px; height: 52px; border-radius: 12px; background: rgba(15,23,42,.05); flex-shrink: 0; }
+#fx-skeleton .fx-sk-card::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgba(99,102,241,.07) 50%, transparent 70%);
+  animation: fxShimmer 1.5s linear infinite;
+}
+@keyframes fxShimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.fx-reveal { animation: fxReveal .4s var(--fx-ease-out) both; }
+@keyframes fxReveal { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* ---------- ⑦ 拖拽中状态（R005-3：纯视觉，不动业务 DOM） ---------- */
+.fx-dragging {
+  transition: none !important;
+  z-index: calc(var(--fx-z-dock) + 2) !important;
+  cursor: grabbing !important;
+  box-shadow: 0 24px 60px rgba(15,23,42,.28), 0 0 0 1.5px rgba(99,102,241,.45) !important;
+  position: relative;
+}
+.fx-drag-ghost-src { opacity: .35; }
+.fx-drop-pulse { animation: fxDropPulse .4s var(--fx-ease-spring); }
+@keyframes fxDropPulse { 0% { transform: scale(1.03); } 60% { transform: scale(.99); } 100% { transform: scale(1); } }
+body.fx-drag-on * { cursor: grabbing !important; }
+/* 让位提示：hover 落点卡高亮描边（纯视觉，不重排） */
+.fx-yield-hint { outline: 1.5px dashed rgba(99,102,241,.5); outline-offset: 2px; }
+
+/* ⑨ Cover Flow：已移除 */

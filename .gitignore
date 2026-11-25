@@ -28,3 +28,11 @@ archive-state.json
 
 # netcheckin 探测脚本的现场产物（截图/JSON dump），每次运行都会重写
 scripts/probe-out/
+
+# local data / test artifacts
+/.free-token/
+/.wb-switch/
+checkin/
+profiles/
+*.jsonl
+scripts/*.png

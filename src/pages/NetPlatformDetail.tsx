@@ -171,6 +171,8 @@ export default function NetPlatformDetail({
 
   const st = p.lastStatus ? STATUS_LABEL[p.lastStatus] || p.lastStatus : null;
   const rowActive = rowActiveRaw;
+  const isGuide = p.engine === 'guide';
+  const guideUrl = p.entryUrls?.[0] || p.homepage;
   // 需要登录按钮的情况：登录失效、检测发现失效，或从没登录过
   const needLogin = p.enabled && (p.lastStatus === 'needs_login' || trial?.status === 'needs_login' || (!p.lastLoginAt && !p.lastTs));
   const loginActive = login?.stage === 'waiting' && login.id === p.id;
@@ -219,8 +221,8 @@ export default function NetPlatformDetail({
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-lg font-semibold text-zinc-900">{p.name}</span>
             <Badge color={CATEGORY_META[p.category]?.color || 'gray'}>{CATEGORY_META[p.category]?.label || p.category}</Badge>
-            <Badge color="gray">{p.kind === 'client' ? '桌面版' : '网页版'}</Badge>
-            <Badge color="gray">{p.visitClaim ? '登录即送' : '签到按钮'}</Badge>
+            <Badge color="gray">{isGuide ? '客户端/小程序' : p.kind === 'client' ? '桌面版' : '网页版'}</Badge>
+            <Badge color="gray">{isGuide ? '需自己领取' : p.visitClaim ? '登录即送' : '签到按钮'}</Badge>
             {rowActive && (
               <Badge color="blue" dot>
                 执行中
@@ -243,7 +245,7 @@ export default function NetPlatformDetail({
           )}
           <Switch checked={p.enabled} disabled={toggling} onChange={(v) => onToggle(p.id, v)} title="开启后参与自动领取与一键执行" />
           {/* 登录按钮只在需要时出现：首次登录、登录失效或检测发现失效；登录成功后立即消失 */}
-          {p.kind === 'web' && (needLogin || loginActive) && (
+          {!isGuide && p.kind === 'web' && (needLogin || loginActive) && (
             <Button
               size="sm"
               variant={needLogin ? 'outline' : 'ghost'}
@@ -254,18 +256,30 @@ export default function NetPlatformDetail({
               {loginActive ? '取消登录' : needLogin ? '重新登录' : '登录'}
             </Button>
           )}
+          {!isGuide && (
+            <Button
+              size="sm"
+              variant="subtle"
+              disabled={rowActive || trialBusy || p.kind === 'client'}
+              loading={trialBusy}
+              onClick={() => run({ dryRun: true })}
+              title={p.kind === 'client' ? '桌面版平台的检测需要重启客户端接管，不做只读检测——直接用「领取」即可' : '只核对入口与登录态，不点击、不领取；顺带把页面上能看到的积分余额刷新进来'}
+            >
+              检测
+            </Button>
+          )}
           <Button
             size="sm"
-            variant="subtle"
-            disabled={rowActive || trialBusy || p.kind === 'client'}
-            loading={trialBusy}
-            onClick={() => run({ dryRun: true })}
-            title={p.kind === 'client' ? '桌面版平台的检测需要重启客户端接管，不做只读检测——直接用「领取」即可' : '只核对入口与登录态，不点击、不领取；顺带把页面上能看到的积分余额刷新进来'}
+            variant="primary"
+            disabled={rowActive || runBusy || !p.enabled || (!isGuide && p.todayDone)}
+            loading={runBusy}
+            onClick={() => {
+              if (isGuide) window.open(guideUrl, '_blank');
+              run();
+              if (isGuide) toast('warn', p.appOnlyNote);
+            }}
           >
-            检测
-          </Button>
-          <Button size="sm" variant="primary" disabled={rowActive || runBusy || !p.enabled || p.todayDone} loading={runBusy} onClick={() => run()}>
-            {p.todayDone ? '今日已领' : '立即领取'}
+            {!isGuide && p.todayDone ? '今日已领' : '立即领取'}
           </Button>
         </div>
       </div>
@@ -293,7 +307,7 @@ export default function NetPlatformDetail({
         <StatCard
           label="今日状态"
           value={p.todayDone ? '已领取' : rowActive ? '执行中' : '未领取'}
-          sub={st ? `最近：${st}${p.lastTs ? ` · ${fmtRelative(p.lastTs)}` : ''}` : '还没有执行过'}
+          sub={p.lastStatus === 'manual_only' ? p.appOnlyNote : st ? `最近：${st}${p.lastTs ? ` · ${fmtRelative(p.lastTs)}` : ''}` : '还没有执行过'}
           tone={p.todayDone ? 'emerald' : 'zinc'}
           icon={<IconZap />}
         />
@@ -328,10 +342,12 @@ export default function NetPlatformDetail({
       <PageSection icon={<IconZap />} title="平台信息">
         <Card className="p-4 space-y-3">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2.5 text-sm">
-            <InfoLine label="领取方式">{p.visitClaim ? '登录即送：打开页面即到账，没有签到按钮' : '签到按钮：由代领引擎在页面里真实点击'}</InfoLine>
+            <InfoLine label="领取方式">
+              {isGuide ? '需在客户端/小程序领取：控制台无法代领，点「立即领取」打开官方领取页' : p.visitClaim ? '登录即送：打开页面即到账，没有签到按钮' : '签到按钮：由代领引擎在页面里真实点击'}
+            </InfoLine>
             <InfoLine label="执行引擎">
-              <span className="font-mono text-xs">{p.engine}</span>
-              {p.headed && '（需要可见浏览器窗口，执行时会弹窗）'}
+              <span className="font-mono text-xs">{isGuide ? 'guide（官方领取指引）' : p.engine}</span>
+              {!isGuide && p.headed && '（需要可见浏览器窗口，执行时会弹窗）'}
             </InfoLine>
             <InfoLine label="奖励说明">{p.reward}</InfoLine>
             <InfoLine label="客户端状态">

@@ -58,6 +58,9 @@ export const KNOWN_CLIENT_PATHS = {
         path.join(WIN_LOCAL, 'Qoder', 'Qoder Launcher', 'Qoder Launcher.exe'),
         path.join(WIN_LOCAL, 'Qoder CN', 'Qoder CN Launcher', 'Qoder CN Launcher.exe'),
       ],
+  loomy: isMacOS
+    ? ['/Applications/Loomy.app']
+    : [path.join(WIN_LOCAL, 'Programs', 'Loomy', 'Loomy.exe'), path.join(WIN_PF, 'Loomy', 'Loomy.exe')],
 };
 
 /**
@@ -147,15 +150,127 @@ export const BUILTIN_PLATFORMS = [
     name: '魔搭社区',
     kind: 'web',
     category: 'code',
+    engine: 'modelscope-web',
+    defaultEnabled: false,
+    reward: '每日登录 200 魔粒，绑定阿里云账号再 +50',
+    homepage: 'https://www.modelscope.cn/',
+    loginUrl: 'https://www.modelscope.cn/',
+    entryUrls: ['https://www.modelscope.cn/magicube/usage?tab=earn'],
+    notes: '魔粒每天登录魔搭自动发放，工具每天用已登录的内置浏览器打开一次魔搭并核对到账；首次点「登录」扫码/手机号登录一次即可长期复用。魔粒可抵扣魔搭 API 推理调用。',
+  },
+  {
+    id: 'dumate',
+    name: '百度搭子',
+    kind: 'web',
+    category: 'code',
+    engine: 'dumate-web',
+    defaultEnabled: false,
+    reward: '每日登录奖励积分（以页面显示为准）',
+    homepage: 'https://console.bce.baidu.com/',
+    loginUrl: 'https://console.bce.baidu.com/',
+    entryUrls: ['https://console.bce.baidu.com/'],
+    notes: '百度智能云「搭子」每日登录奖励：工具用已登录的内置浏览器调用官方接口查询并领取。首次点「登录」用百度账号登录一次即可。',
+  },
+  {
+    id: 'monkeycode',
+    name: '长亭 MonkeyCode',
+    kind: 'web',
+    category: 'code',
     engine: 'web',
     defaultEnabled: false,
-    reward: '200 魔粒/天（绑定阿里云账号再 +50），可用于 API 推理与 AIGC 算力抵扣',
-    homepage: 'https://modelscope.cn/',
-    loginUrl: 'https://modelscope.cn/',
-    entryUrls: ['https://modelscope.cn/my/molic'],
-    keywords: ['领取', '签到', '立即领取', '每日登录'],
-    doneKeywords: ['已领取', '今日已领取', '明日再来', '明天再来', '已签到'],
-    notes: '每日登录在「赚魔粒」页领取魔粒（2026-11 调研：每日 200，绑阿里云 +50）；先点工具里的「登录」授权魔搭账号，再开开关。',
+    reward: '每日签到 100 积分（约 ¥0.5，用于 MonkeyCode 内的模型调用）',
+    homepage: 'https://monkeycode-ai.com/',
+    loginUrl: 'https://monkeycode-ai.com/',
+    entryUrls: ['https://monkeycode-ai.com/'],
+    keywords: ['签到', '每日签到', '立即签到'],
+    doneKeywords: ['今日已签到', '已签到', '明日再来', '明天再来'],
+    notes: '在 MonkeyCode 网页左下角积分/钱包里每天手动签到一次；首次点「登录」用百智云账号登录。积分只能在 MonkeyCode 里用。',
+  },
+  {
+    id: 'codearts',
+    name: '华为云码道',
+    kind: 'web',
+    category: 'code',
+    engine: 'web',
+    defaultEnabled: false,
+    reward: '免费版每日领取 100 积分（标准版 150、高级版 200）；报名 Skill 创新赛的账号每天另有 1000 积分可领（报名至 11 月 29 日，活动到 12 月 5 日）',
+    homepage: 'https://codearts.huaweicloud.com/',
+    loginUrl: 'https://codearts.huaweicloud.com/',
+    entryUrls: ['https://codearts.huaweicloud.com/'],
+    keywords: ['每日领取', '立即领取', '领取'],
+    doneKeywords: ['已领取', '今日已领', '明日再来'],
+    beforeClickSelectors: ['text=活动福利'],
+    notes: '需已升级到积分计费模式的个人版套餐；登录码道网页端后点左下角头像 →「活动福利」→「每日领取」，当日领取当日有效。活动到 2026-12-31。',
+  },
+  {
+    id: 'haimian',
+    name: '海绵音乐',
+    kind: 'web',
+    category: 'art',
+    engine: 'web',
+    defaultEnabled: false,
+    visitClaim: true,
+    requireLoginSig: true,
+    reward: '每天登录送 100 积分（新用户 200），次日凌晨 5 点清零',
+    homepage: 'https://www.haimian.com/',
+    loginUrl: 'https://www.haimian.com/',
+    entryUrls: ['https://www.haimian.com/'],
+    notes: '字节跳动的 AI 音乐，网页和 App 各自发每日登录积分、余额互通；工具每天用已登录的内置浏览器打开一次网页即算登录。首次点「登录」用抖音扫码。',
+  },
+  {
+    id: 'meoo',
+    name: '秒悟 Meoo',
+    kind: 'web',
+    category: 'code',
+    engine: 'web',
+    defaultEnabled: false,
+    visitClaim: true,
+    requireLoginSig: true,
+    reward: '每天首次登录送 2000 积分，领取后 7 天有效',
+    homepage: 'https://meoo.com/',
+    loginUrl: 'https://meoo.com/',
+    entryUrls: ['https://meoo.com/'],
+    notes: '阿里的 AI 应用生成平台，所有用户每日首次登录获赠 2000 积分；工具每天打开一次已登录的网页即可。',
+  },
+  {
+    id: 'officeace',
+    name: '华为果办 OfficeAce',
+    kind: 'web',
+    category: 'chat',
+    engine: 'guide',
+    defaultEnabled: false,
+    claimViaApp: true,
+    reward: '个人体验版每天登录客户端或微信小程序送 50 积分（当日有效，限时活动）',
+    homepage: 'https://activity.huaweicloud.com/officeace.html',
+    entryUrls: ['https://activity.huaweicloud.com/officeace.html#section-3'],
+    appOnlyNote: '需在果办 OfficeAce 客户端或微信小程序里登录领取，控制台无法代领：点「立即领取」会打开官方活动页。',
+    notes: '需在果办 OfficeAce 客户端或微信小程序里登录领取，控制台无法代领：点「立即领取」会打开官方活动页。',
+  },
+  {
+    id: 'astudio',
+    name: '讯飞 AStudio',
+    kind: 'web',
+    category: 'code',
+    engine: 'guide',
+    defaultEnabled: false,
+    claimViaApp: true,
+    reward: '体验版每天登录客户端领 100 积分（领取后 31 天有效）',
+    homepage: 'https://agent.xfyun.cn/',
+    entryUrls: ['https://agent.xfyun.cn/studio-guide/pricing'],
+    appOnlyNote: '需在 AStudio 电脑客户端（Windows 10/11 64 位）手机号登录后领取，控制台无法代领：点「立即领取」会打开官方说明页。',
+  },
+  {
+    id: 'mobileclaw',
+    name: '移动云 MobileClaw',
+    kind: 'web',
+    category: 'code',
+    engine: 'guide',
+    defaultEnabled: false,
+    claimViaApp: true,
+    reward: '实名后每天在电脑客户端登录领 100 万 Token（领取后 30 天有效，活动到 12 月 31 日，最多领 55 天）',
+    homepage: 'https://ecloud.10086.cn/',
+    entryUrls: ['https://ecloud.10086.cn/mobilecloud/act/2026-double11'],
+    appOnlyNote: '需完成移动云实名认证，在 MobileClaw 电脑客户端登录领取，控制台无法代领：点「立即领取」会打开官方活动页。',
   },
   // 扣子（coze）：2026-11 移除。字节已公告企业版停止售卖、专业版停服（2027 年底全面停服），
   // 平台处于收缩期；个人版「登录送 60 积分、当日作废」价值低，不值得继续维护代领。
@@ -164,6 +279,13 @@ export const BUILTIN_PLATFORMS = [
   // 四家都是「登录即送」（visitClaim）：奖励打开官网就自动到账，没有可点的领取动作，
   // 「代领」只是替用户开一次页面，没有价值——与智谱清言同理，无法累计/攒库存的都归羊毛情报。
   // 用户配置里遗留的 platforms.<id> / logins.<id> 会被自动忽略，历史记录仍留在流水里。
+  {
+    id: 'loomy', name: '讯飞 Loomy', kind: 'client', category: 'chat', engine: 'client-open', defaultEnabled: false,
+    reward: '每日登录自动刷新为 5000 积分（当天有效）',
+    app: KNOWN_CLIENT_PATHS.loomy[0], appCandidates: KNOWN_CLIENT_PATHS.loomy,
+    homepage: 'https://loomy.xunfei.cn/', port: 9446, keepRunning: true,
+    notes: '讯飞 Loomy 桌面版：每天登录后「每日赠送积分」自动刷新为 5000（客户端里写的规则），没有签到按钮。控制台每天替你打开一次客户端（已开着就不动），不读它的登录信息；它的正式版禁止外部接管，所以结果只能显示「结果未确认」，到账请在 Loomy「设置 → 积分详情」里看。',
+  },
 ];
 
 /** 内置平台的 id 集合（用于区分自定义平台） */
@@ -185,6 +307,8 @@ export function normalizePlatform(p) {
     // 「已登录」页面，不清掉用户没法重新扫码（zhipu 实测）
     reloginClearCookies: Boolean(p.reloginClearCookies),
     visitClaim: Boolean(p.visitClaim),
+    // 登录即送平台必须有登录签名或专属字样才算已登录，不用「页面没有登录二字」兜底
+    requireLoginSig: Boolean(p.requireLoginSig),
     // 登录即送类平台：页面出现这些字样即视为已登录（Vidu 的 /create、吐司页头的「算力」等）
     loginOkTexts: Array.isArray(p.loginOkTexts) ? p.loginOkTexts : [],
     // 积分需要下载客户端/在 App 内领取的平台：入口未命中时主动提醒，而不是让用户翻运行记录
@@ -272,13 +396,14 @@ const CLIENT_DISCOVERY = {
     exeNames: ['Qoder CN.exe', 'QoderCN.exe'],
     subDirs: [''],
   },
+  loomy: { display: /loomy/i, cnOnly: false, dirNames: ['Loomy'], exeNames: ['Loomy.exe'], subDirs: [''] },
 };
 
 const isLauncherExe = (c) => /launcher/i.test(String(c || ''));
 const isServiceExe = (c) => /uninstall|setup|installer|launcher|update|elevate|crash|helper/i.test(String(c || ''));
 
 /** 系统快照：一次 PowerShell 拿到卸载项与运行中客户端路径，进程内缓存 5 分钟 */
-const EMPTY_SNAPSHOT = { uninstall: [], processes: [] };
+const EMPTY_SNAPSHOT = { uninstall: [], processes: [], shortcuts: [] };
 let SNAPSHOT = { at: 0, data: null };
 const SNAPSHOT_TTL_MS = 5 * 60_000;
 const SNAPSHOT_FAIL_TTL_MS = 30_000;
@@ -304,8 +429,11 @@ function querySystemSnapshot() {
     " 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'",
     ')',
     '$u = @(Get-ItemProperty -Path $roots -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName } | Select-Object DisplayName, DisplayIcon, InstallLocation, UninstallString)',
-    "$p = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -match 'Qoder|Doubao|Trae' } | Select-Object -ExpandProperty Path -Unique)",
-    '@{ uninstall = $u; processes = $p } | ConvertTo-Json -Compress -Depth 4',
+    "$p = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -match 'Qoder|Doubao|Trae|Loomy' } | Select-Object -ExpandProperty Path -Unique)",
+    "$sh = New-Object -ComObject WScript.Shell",
+    "$lnkDirs = @([Environment]::GetFolderPath('StartMenu'), [Environment]::GetFolderPath('CommonStartMenu'), [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('CommonDesktopDirectory')) | Where-Object { $_ }",
+    "$l = @(Get-ChildItem -Path $lnkDirs -Recurse -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object { try { $t = $sh.CreateShortcut($_.FullName).TargetPath; if ($t -and $t.EndsWith('.exe')) { @{ name = $_.BaseName; target = $t } } } catch {} })",
+    '@{ uninstall = $u; processes = $p; shortcuts = $l } | ConvertTo-Json -Compress -Depth 4',
   ].join('\n');
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
   const args = ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded];
@@ -314,7 +442,11 @@ function querySystemSnapshot() {
       const out = execFileSync(cmd, args, { encoding: 'utf8', timeout: 20_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
       const parsed = JSON.parse(String(out || '').trim() || '{}');
       const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
-      return { uninstall: asArray(parsed.uninstall), processes: asArray(parsed.processes).filter((x) => typeof x === 'string') };
+      return {
+        uninstall: asArray(parsed.uninstall),
+        processes: asArray(parsed.processes).filter((x) => typeof x === 'string'),
+        shortcuts: asArray(parsed.shortcuts).filter((x) => x && typeof x.target === 'string'),
+      };
     } catch (e) {
       // 只有「找不到 powershell.exe」才值得换绝对路径重试；其它错误直接走 reg 备用
       if (e?.code !== 'ENOENT') break;
@@ -350,7 +482,7 @@ function queryUninstallViaReg() {
     }
     if (cur) rows.push(cur);
   }
-  return { uninstall: rows.filter((r) => r.DisplayName), processes: [] };
+  return { uninstall: rows.filter((r) => r.DisplayName), processes: [], shortcuts: [] };
 }
 
 function readSystemSnapshot() {
@@ -492,7 +624,7 @@ export function clearClientDiscoveryCache() {
 
 /**
  * 完整探测，返回 { exe, source, launcherOnly, tried }。
- * source: config / static / drive-scan / running-process / registry / launcher-ini / launcher / none
+ * source: config / static / drive-scan / running-process / registry / shortcut / launcher-ini / launcher / none
  * launcherOnly=true 表示只找到引导壳，不能拿去开 CDP。
  */
 export function clientProbe(p, opts = {}) {
@@ -567,6 +699,18 @@ function probeClientNow(p, opts = {}) {
         if (found) return hit(found, 'registry');
       }
     }
+
+    // 4.5) 快捷方式：应用商店装的软件常没有卸载项（豆包实测就是），但开始菜单/桌面有 .lnk。
+    // 快捷方式可能只指向外层启动壳，主程序在 app\ 子目录里——交给 findMainExeInDir 按 subDirs 找。
+    for (const s of snap.shortcuts || []) {
+      const name = String(s.name || '');
+      const target = String(s.target || '');
+      if (!spec.display.test(name) && !spec.display.test(path.basename(target))) continue;
+      if (/卸载|uninstall/i.test(name)) continue;
+      if (spec.cnOnly && !/cn/i.test(target)) continue;
+      const found = findMainExeInDir(path.dirname(target), spec);
+      if (found) return hit(found, 'shortcut');
+    }
   }
 
   // 5) Launcher ini 反查
@@ -596,7 +740,7 @@ function probeClientNow(p, opts = {}) {
 /** 排障用：直接查看系统快照（卸载项与运行中客户端路径），不触发任何写操作 */
 export function debugSystemSnapshot() {
   const s = readSystemSnapshot();
-  return { uninstallCount: s.uninstall.length, processes: s.processes };
+  return { uninstallCount: s.uninstall.length, processes: s.processes, shortcutCount: s.shortcuts.length };
 }
 
 /** 兼容旧调用方：只要可执行文件字符串 */

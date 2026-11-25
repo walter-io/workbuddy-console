@@ -37,6 +37,55 @@ import { clientProbe, isClientRunning, quitClientGracefully } from './registry.m
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const firstLine = (s) => String(s ?? '').split('\n')[0];
 
+/**
+ * 客户端可能自己关掉/替换签到页（豆包实测：openUrl 新页后主框架连跳 3 次，
+ * 活动页也常被用户或客户端自己关掉）。这里始终拿一个还活着的页面：
+ * 原页没关就原样用；关了就先找同地址的同伴页，找不到再用 openUrl 新开一次。
+ */
+async function livePage(browser, page, platform) {
+  if (page && !page.isClosed()) return page;
+  const allPages = () => browser.contexts().flatMap((c) => c.pages());
+  const key = platform.openUrl ? String(platform.openUrl).split('?')[0] : '';
+  const isOurs = (p) => {
+    try {
+      const u = p.url();
+      return Boolean((key && u.includes(key)) || (platform.pageUrlMatch && u.includes(platform.pageUrlMatch)));
+    } catch {
+      return false;
+    }
+  };
+  const found = allPages().find((p) => !p.isClosed() && isOurs(p));
+  if (found) return found;
+  if (platform.openUrl) {
+    try {
+      const np = await browser.contexts()[0].newPage();
+      await np.goto(platform.openUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+      np.__checkinOpenedByUs = true; // 我们开的标签页，收尾时必须关掉
+      return np;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** 页面被客户端关掉/替换时，换一个活页面再试一次（最多 2 次重试，仍失败抛原错） */
+const CLIENT_PAGE_DEAD = /Target page, context or browser has been closed|Execution context was destroyed|Target closed|frame was detached/i;
+async function safeRead(fn, getPage) {
+  let lastErr;
+  for (let attempt = 0; attempt <= 2; attempt++) {
+    try {
+      return await fn(await getPage());
+    } catch (e) {
+      if (!CLIENT_PAGE_DEAD.test(String(e?.message || e))) throw e;
+      lastErr = e;
+      if (attempt === 2) break;
+      await sleep(1500);
+    }
+  }
+  throw lastErr;
+}
+
 /** 把 Chromium 的网络错误码翻译成人话（原始报错附在后面备查）：
  *  实测最常撞上的是 ERR_TIMED_OUT——Cloudflare 站点偶发慢，重试通常就能过 */
 const NET_ERROR_HINTS = [
@@ -175,10 +224,10 @@ export async function runGenericWeb(platform, page, logger, ctx) {
       if (sig === 'valid') {
         return { status: 'success', detail: '已到账（登录凭据有效，登录即送）', url: page.url(), meta: { credits: captureCredits(platform, text) } };
       }
-      if (/(^|\n)\s*(登录 \/ 注册|登录\/注册|登录|注册)\s*(\n|$)/.test(text)) {
+      if (!platform.requireLoginSig && /(^|\n)\s*(登录 \/ 注册|登录\/注册|登录|注册)\s*(\n|$)/.test(text)) {
         return { status: 'needs_login', detail: '登录入口仍在，点「重新登录」授权一次', url: page.url() };
       }
-      if (platform.loginProbePath && page.url().includes(platform.loginProbePath)) {
+      if (!platform.requireLoginSig && platform.loginProbePath && page.url().includes(platform.loginProbePath)) {
         return { status: 'success', detail: '已到账（登录即送，打开页面即发放）', url: page.url() };
       }
       // 页面出现平台专属的登录后字样（如吐司页头的「算力」余额）= 已登录且已到账
@@ -189,8 +238,11 @@ export async function runGenericWeb(platform, page, logger, ctx) {
       // 兜底正证：登录后的页面不会再有任何「登录/注册」入口文字（吐司实测——
       // 登录态在 localStorage，cookie 判定不适用；已登录页全文找不到「登录」二字，
       // 未登录的页面必然挂着登录入口）。走到这里说明登录墙检测已经通过。
-      if (!/(登录|注册)/.test(text)) {
+      if (!platform.requireLoginSig && !/(登录|注册)/.test(text)) {
         return { status: 'success', detail: '已到账（页面上没有「登录/注册」入口，视为已登录；登录即送到账）', url: page.url(), meta: { credits: captureCredits(platform, text) } };
+      }
+      if (platform.requireLoginSig) {
+        return { status: 'needs_login', detail: '还没在工具里登录过（或登录已失效）——点「登录」授权一次', url: page.url() };
       }
       return { status: 'needs_login', detail: '未检测到登录态——点「重新登录」授权一次', url: page.url() };
     }
@@ -276,11 +328,11 @@ export async function dryRunWeb(platform, page, logger, ctx) {
     if (sig === 'valid') {
       return { status: 'dry_run', detail: '检测通过：登录凭据有效（登录即送平台，访问即到账）', url: page.url(), candidates: [], buttons: allButtons, meta: { credits: captureCredits(platform, text) } };
     }
-    if (/(^|\n)\s*(登录 \/ 注册|登录\/注册|登录|注册)\s*(\n|$)/.test(text)) {
+    if (!platform.requireLoginSig && /(^|\n)\s*(登录 \/ 注册|登录\/注册|登录|注册)\s*(\n|$)/.test(text)) {
       return { status: 'needs_login', detail: '登录入口仍在（点「登录」授权一次）', url: page.url(), candidates: [], buttons: allButtons };
     }
     // 探测路径命中（登录后仍停留的页面地址）= 已登录的正证
-    if (platform.loginProbePath && page.url().includes(platform.loginProbePath)) {
+    if (!platform.requireLoginSig && platform.loginProbePath && page.url().includes(platform.loginProbePath)) {
       return { status: 'dry_run', detail: '检测通过：已登录（登录即送平台，访问即到账）', url: page.url(), candidates: [], buttons: allButtons, meta: { credits: captureCredits(platform, text) } };
     }
     // 页面出现平台专属的登录后字样（如吐司页头的「算力」余额）= 已登录
@@ -289,8 +341,11 @@ export async function dryRunWeb(platform, page, logger, ctx) {
       return { status: 'dry_run', detail: `检测通过：页面出现「${okHit}」，已登录且已到账`, url: page.url(), candidates: [], buttons: allButtons, meta: { credits: captureCredits(platform, text) } };
     }
     // 兜底正证：全文没有「登录/注册」字样 = 登录入口已消失 = 已登录（同正式运行的判定）
-    if (!/(登录|注册)/.test(text)) {
+    if (!platform.requireLoginSig && !/(登录|注册)/.test(text)) {
       return { status: 'dry_run', detail: '检测通过：页面上没有「登录/注册」入口，视为已登录', url: page.url(), candidates: [], buttons: allButtons, meta: { credits: captureCredits(platform, text) } };
+    }
+    if (platform.requireLoginSig) {
+      return { status: 'needs_login', detail: '还没在工具里登录过（或登录已失效）——点「登录」授权一次', url: page.url(), candidates: [], buttons: allButtons };
     }
     return { status: 'needs_login', detail: '未检测到登录态——点「登录」在工具里登录一次后再检测', url: page.url(), candidates: [], buttons: allButtons };
   }
@@ -397,6 +452,9 @@ export async function runMinimax(page, logger, { dryRun = false } = {}) {
     if (await openMinimaxAccountMenu(page, logger)) {
       await clickVisibleText(page, ['每日签到'], logger);
       await sleep(2500);
+    } else {
+      const loginBtn = await page.locator('button:has-text("登录")').first().isVisible({ timeout: 1500 }).catch(() => false);
+      if (loginBtn) return { status: 'needs_login', detail: '还没在工具里登录过 MiniMax（或登录已失效）——点「登录」扫码登录一次' };
     }
     text = await pageVisibleTextDeep(page);
 
@@ -512,6 +570,229 @@ export async function runMinimax(page, logger, { dryRun = false } = {}) {
 }
 
 /* ======================================================================
+ * 魔搭社区 / 百度搭子：登录态在页面里直接调官方接口，不靠按钮文案
+ * ======================================================================
+ * 魔搭的每日登录魔粒是「打开网站自动发放」，没有领取按钮；百度搭子的登录
+ * 奖励是纯接口（查状态 → POST 领取 → 复查）。两者都在页面内 fetch，带
+ * credentials:'include'，用已登录的内置浏览器会话；Cookie/token 只留在浏览器里，
+ * 日志最多写「读到余额 X」。
+ */
+
+const MS_HOME = 'https://www.modelscope.cn/';
+const MS_EARN_PAGE = 'https://www.modelscope.cn/magicube/usage?tab=earn';
+
+/** 在页面里读魔搭的魔粒任务表与余额（只回传状态码和 JSON，Cookie 不出浏览器） */
+async function readModelscopeSnapshot(page) {
+  return page.evaluate(async () => {
+    const get = async (u) => {
+      try {
+        const r = await fetch(u, { credentials: 'include', headers: { Accept: 'application/json' } });
+        let json = null;
+        try { json = await r.json(); } catch { /* 非 JSON 当成读不懂 */ }
+        return { status: r.status, json };
+      } catch {
+        return { status: -1, json: null };
+      }
+    };
+    const [rules, balance] = await Promise.all([
+      get('/openapi/v1/magicubes/earn/rules'),
+      get('/openapi/v1/magicubes/balance'),
+    ]);
+    return { rules, balance };
+  });
+}
+
+function msNotLoggedIn(resp) {
+  if (!resp) return false;
+  if (resp.status === 401 || resp.status === 403) return true;
+  const j = resp.json;
+  if (!j || typeof j !== 'object') return false;
+  const code = String(j.code ?? j.Code ?? '');
+  const msg = String(j.message ?? j.Message ?? '');
+  return /InvalidAuthentication|not.?logged|未登录|10010101003/i.test(code + ' ' + msg);
+}
+
+function msBalanceOf(json) {
+  const d = json && (json.data !== undefined ? json.data : json.Data);
+  if (!d || typeof d !== 'object') return null;
+  const a = d.available_balance !== undefined ? d.available_balance : d.total_balance;
+  if (a === undefined || a === null || a === '') return null;
+  const n = Number(a);
+  return Number.isFinite(n) ? n : null;
+}
+
+function msRuleListOf(json) {
+  if (!json || typeof json !== 'object') return null;
+  let d = json.data !== undefined ? json.data : (json.Data !== undefined ? json.Data : json);
+  if (d && !Array.isArray(d) && typeof d === 'object') d = d.rules || d.list || d.items || null;
+  if (!Array.isArray(d)) return null;
+  return d.filter((x) => x && typeof x === 'object');
+}
+
+/** 从任务表算今日登录奖励：received=是否已到账，total=含绑阿里云的总数，extra=绑阿里云附加 */
+function msRewardOf(list) {
+  const da = list.find((x) => x.rule_key === 'daily_active');
+  const bind = list.find((x) => x.rule_key === 'aliyun_bindlogin');
+  const received = Boolean(da && (Number(da.today_used) >= 1 || Number(da.today_earned_amount) > 0));
+  const extra = bind && Number(bind.today_earned_amount) > 0 ? Number(bind.today_earned_amount) : 0;
+  const raw = da ? Number(da.today_earned_amount || da.amount || 200) : 200;
+  const base = Number.isFinite(raw) && raw > 0 ? raw : 200;
+  return { received, total: base + extra, extra };
+}
+
+export async function runModelscope(page, logger, { dryRun = false } = {}) {
+  logger?.step?.(`打开 ${MS_HOME}`);
+  await page.goto(MS_HOME, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => null);
+  await sleep(3000);
+
+  const first = await readModelscopeSnapshot(page).catch(() => null);
+  if (msNotLoggedIn(first?.rules) || msNotLoggedIn(first?.balance)) {
+    return { status: 'needs_login', detail: '魔搭登录已失效，点「登录」重新登录一次' };
+  }
+  const firstList = msRuleListOf(first?.rules?.json);
+  if (!firstList) {
+    return { status: 'not_found', detail: '读不懂魔搭魔粒接口返回（格式可能改了）' };
+  }
+  const credits = msBalanceOf(first?.balance?.json);
+  const firstReward = msRewardOf(firstList);
+  logger?.info?.(`魔搭读到余额 ${credits ?? '未知'}，今日${firstReward.received ? '已' : '未'}到账`);
+
+  if (firstReward.received) {
+    return { status: 'already', detail: `今日登录魔粒已到账 ${firstReward.total}`, meta: { credits } };
+  }
+  if (dryRun) {
+    return { status: 'dry_run', detail: '已登录，今日魔粒尚未到账', meta: { credits } };
+  }
+
+  // 魔搭没有领取按钮：带登录态打开「赚魔粒」页让站点自动发放，等 5 秒再复查
+  logger?.step?.(`打开 ${MS_EARN_PAGE}`);
+  await page.goto(MS_EARN_PAGE, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
+  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => null);
+  await sleep(5000);
+
+  const second = await readModelscopeSnapshot(page).catch(() => null);
+  if (msNotLoggedIn(second?.rules) || msNotLoggedIn(second?.balance)) {
+    return { status: 'needs_login', detail: '魔搭登录已失效，点「登录」重新登录一次' };
+  }
+  const secondList = msRuleListOf(second?.rules?.json);
+  if (!secondList) {
+    return { status: 'not_found', detail: '读不懂魔搭魔粒接口返回（格式可能改了）' };
+  }
+  const credits2 = msBalanceOf(second?.balance?.json);
+  const reward2 = msRewardOf(secondList);
+  logger?.info?.(`魔搭复查余额 ${credits2 ?? '未知'}，今日${reward2.received ? '已' : '未'}到账`);
+  if (reward2.received) {
+    const extra = reward2.extra > 0 ? `（含绑阿里云 +${reward2.extra}）` : '';
+    return { status: 'success', detail: `今日登录魔粒已到账 ${reward2.total}${extra}`, meta: { credits: credits2 } };
+  }
+  return { status: 'uncertain', detail: '已打开魔搭，魔粒暂未显示到账（官方发放可能有延迟），稍后点「检测」再看', meta: { credits: credits2 } };
+}
+
+const DU_HOME = 'https://console.bce.baidu.com/';
+const DU_INFO = '/api/dumate/points/loginBonusInfo';
+const DU_BONUS = '/api/dumate/points/loginBonus';
+
+/** 页面内调百度搭子接口；csrftoken 从 bce-user-info Cookie 取值（Node 侧读好传进来） */
+async function dumateCall(page, path, method, csrf) {
+  return page.evaluate(async ({ path, method, csrf }) => {
+    const headers = { Accept: 'application/json' };
+    if (csrf) headers.csrftoken = csrf;
+    if (method === 'POST') headers['Content-Type'] = 'application/json';
+    try {
+      const r = await fetch(path, { method, credentials: 'include', headers, body: method === 'POST' ? '' : undefined });
+      let json = null;
+      try { json = await r.json(); } catch { /* 非 JSON 忽略 */ }
+      return { status: r.status, json, url: r.url || location.href };
+    } catch {
+      return { status: -1, json: null, url: '' };
+    }
+  }, { path, method, csrf });
+}
+
+function duNotLoggedIn(resp) {
+  if (!resp) return false;
+  if (resp.status === 401 || resp.status === 403) return true;
+  if (resp.url && /passport\.baidu\.com|[?&/=]login(?:[?&#/]|$)/i.test(resp.url)) return true;
+  const j = resp.json;
+  if (!j || typeof j !== 'object') return false;
+  const code = String(j.code ?? j.errorCode ?? j.errno ?? '');
+  const msg = String(j.message ?? j.msg ?? '');
+  return /not.?login|not.?logged|未登录|登录已失效|session.?expired/i.test(code + ' ' + msg);
+}
+
+/** result/data/根三层都看一遍，兼容字段位置变动 */
+function duPayload(json) {
+  const j = json && typeof json === 'object' ? json : {};
+  if (j.result && typeof j.result === 'object') return j.result;
+  if (j.data && typeof j.data === 'object') return j.data;
+  return j;
+}
+
+function duPoints(json) {
+  const v = duPayload(json).totalPoints;
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function duHasIssued(json) {
+  return duPayload(json).hasIssued === true;
+}
+
+function duMessage(json) {
+  const j = json && typeof json === 'object' ? json : {};
+  return String(j.message ?? j.msg ?? duPayload(j).message ?? duPayload(j).msg ?? '');
+}
+
+export async function runDumate(page, logger, { dryRun = false } = {}) {
+  logger?.step?.(`打开 ${DU_HOME}`);
+  await page.goto(DU_HOME, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => null);
+  await sleep(1500);
+
+  const cookies = await page.context().cookies(DU_HOME).catch(() => []);
+  const info0 = cookies.find((c) => c && c.name === 'bce-user-info');
+  const csrf = info0 ? String(info0.value || '').replace(/^['"]|['"]$/g, '') : '';
+  if (!csrf || new URL(page.url()).hostname !== 'console.bce.baidu.com') {
+    return { status: 'needs_login', detail: '百度搭子还没登录（或登录已失效），点「登录」用百度账号登录一次' };
+  }
+
+  const info = await dumateCall(page, DU_INFO, 'GET', csrf).catch(() => null);
+  if (duNotLoggedIn(info)) {
+    return { status: 'needs_login', detail: '百度搭子登录已失效，点「登录」重新登录一次' };
+  }
+  if (!info || info.status !== 200 || !info.json || info.json.success !== true) {
+    return { status: 'uncertain', detail: `百度搭子状态接口异常${info?.status ? `（HTTP ${info.status}）` : ''}${duMessage(info?.json) ? `：${duMessage(info?.json)}` : ''}` };
+  }
+  const credits = duPoints(info.json);
+  logger?.info?.(`百度搭子读到积分 ${credits ?? '未知'}`);
+  if (duHasIssued(info.json)) {
+    return { status: 'already', detail: '今日奖励已领取', meta: { credits } };
+  }
+  if (dryRun) {
+    return { status: 'dry_run', detail: '已登录，今日奖励尚未领取', meta: { credits } };
+  }
+
+  const claim = await dumateCall(page, DU_BONUS, 'POST', csrf).catch(() => null);
+  if (duNotLoggedIn(claim)) {
+    return { status: 'needs_login', detail: '百度搭子登录已失效，点「登录」重新登录一次' };
+  }
+  const recheck = await dumateCall(page, DU_INFO, 'GET', csrf).catch(() => null);
+  if (duNotLoggedIn(recheck)) {
+    return { status: 'needs_login', detail: '百度搭子登录已失效，点「登录」重新登录一次' };
+  }
+  const afterCredits = recheck?.json?.success === true ? duPoints(recheck.json) : null;
+  if (recheck?.json?.success === true && duHasIssued(recheck.json)) {
+    const got = claim?.json?.result;
+    const gotText = typeof got === 'number' ? `+${got} 积分，` : '';
+    return { status: 'success', detail: `领取成功，${gotText}当前积分 ${afterCredits ?? credits ?? 0}`, meta: { credits: afterCredits ?? credits } };
+  }
+  const msg = duMessage(claim?.json) || duMessage(recheck?.json);
+  return { status: 'uncertain', detail: `已请求领取，但未能确认到账${msg ? `（接口提示：${msg}）` : ''}`, meta: { credits: afterCredits ?? credits } };
+}
+
+/* ======================================================================
  * 桌面版平台：CDP 临时接管桌面客户端
  * ======================================================================
  * 适用对象：Electron / Chromium 壳客户端。界面本质是网页，开了调试端口就能：
@@ -624,14 +905,56 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
   // 2) 连进去（playwright 惰性加载：桌面版平台不依赖浏览器 profile，但依赖 CDP 客户端）
   const { chromium } = await loadPlaywright();
   let browser;
+  // Playwright 自带的 HTTP 栈会认 HTTP_PROXY/HTTPS_PROXY 环境变量，把发往本机 127.0.0.1 的
+  // CDP 请求也塞进系统代理（实测 sing-box 2080：Host 与代理 authority 不一致直接拒连；Node
+  // 原生 fetch 不认这些变量，所以上面的 cdpVersion 照常通）。连接窗口内临时剥掉代理变量。
+  const PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy'];
+  const savedProxyEnv = {};
+  for (const k of PROXY_ENV_KEYS) {
+    savedProxyEnv[k] = process.env[k];
+    delete process.env[k];
+  }
   try {
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 20_000 });
   } catch (e) {
     if (launched && !wasRunningOriginally) await quitClientGracefully(exe);
     return { status: 'error', detail: `连接客户端失败: ${firstLine(e?.message || e)}` };
+  } finally {
+    for (const k of PROXY_ENV_KEYS) {
+      if (savedProxyEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedProxyEnv[k];
+    }
   }
 
   let page;
+  let openedByUs = false;
+  // 签到过程中页面随时可能被客户端关掉/替换：所有读页面、找按钮、点按钮都从这里
+  // 拿一个活页再执行；livePage 连新页都开不出来时抛标记错误，由下面的 catch 收口。
+  let clickedOnce = false;
+  const getLivePage = () => {
+    // 点过领取之后页面没了：绝不重开/换页再读——重开的新页还在加载，会把「按钮还没画出来」
+    // 误判成「入口已消失=已领取」（离线模拟实测）。直接交给 catch 报「结果待确认」。
+    if (clickedOnce && (!page || page.isClosed())) {
+      const err = new Error('客户端把签到页关掉了');
+      err.code = 'CHECKIN_PAGE_GONE';
+      return Promise.reject(err);
+    }
+    return livePage(browser, page, platform).then((p) => {
+    if (!p) {
+      const err = new Error('客户端把签到页关掉了，下次再试');
+      err.code = 'CHECKIN_PAGE_GONE';
+      throw err;
+    }
+    if (p.__checkinOpenedByUs) openedByUs = true;
+    page = p;
+    return p;
+    });
+  };
+  const read = (fn) => safeRead(fn, getLivePage);
+  // 会点击的操作绝不重试：点完页面才被关掉时重试会再点一次（重复领取）。
+  // 只取一次活页执行；点击之后页面没了，交给 catch 报「结果待确认」。
+  const act = async (fn) => fn(await getLivePage());
+
   try {
     // 3) 选页面（必要时用客户端的登录态新开一个任务页）
     const pages = browser.contexts().flatMap((c) => c.pages());
@@ -639,9 +962,22 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
 
     if (platform.openUrl) {
       page = await browser.contexts()[0].newPage();
+      openedByUs = true;
       await page.goto(platform.openUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
       // 任务/活动面板走异步渲染，多留点时间让它画完
       await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => null);
+      // 豆包实测主框架会连续跳 3 次：等 url 稳定 2 秒再读，否则读的是半途的中间页
+      let lastNavAt = Date.now();
+      const onNav = (frame) => {
+        if (frame === page.mainFrame()) lastNavAt = Date.now();
+      };
+      page.on('framenavigated', onNav);
+      const navDeadline = Date.now() + 10_000;
+      while (Date.now() < navDeadline) {
+        await sleep(500);
+        if (Date.now() - lastNavAt >= 2000) break;
+      }
+      page.off('framenavigated', onNav);
       await sleep(2500);
     } else {
       // 客户端的窗口目标不是跟调试端口一起出现的：主窗口（如 Trae 的 workbench）要再画几秒
@@ -663,21 +999,26 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     // 3.5) 签到入口藏在账户菜单里的客户端：先点开菜单
     let menuAlreadyOpen = false;
     if (platform.menuOpenTexts.length) {
-      const cur = await pageVisibleText(page);
+      const cur = await read((p) => pageVisibleText(p));
       menuAlreadyOpen = platform.menuOpenTexts.some((t) => cur.includes(t));
       if (menuAlreadyOpen) logger?.step?.('前置菜单已打开，跳过点击');
     }
     if (platform.beforeClickSelectors.length && !menuAlreadyOpen) {
       for (const sel of platform.beforeClickSelectors) {
         try {
-          const loc = page.locator(sel).first();
-          if (await loc.isVisible({ timeout: 1500 })) {
-            logger?.step?.(`打开前置菜单: ${sel}`);
-            await loc.click({ timeout: 4000 });
-            await sleep(1500);
-            break;
-          }
-        } catch {
+          const opened = await act(async (p) => {
+            const loc = p.locator(sel).first();
+            if (await loc.isVisible({ timeout: 1500 })) {
+              logger?.step?.(`打开前置菜单: ${sel}`);
+              await loc.click({ timeout: 4000 });
+              await sleep(1500);
+              return true;
+            }
+            return false;
+          });
+          if (opened) break;
+        } catch (e) {
+          if (e?.code === 'CHECKIN_PAGE_GONE') throw e;
           /* 换下一个 */
         }
       }
@@ -689,14 +1030,14 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     // 这里轮询等「完成态文案 / 候选按钮」出现，最多 18 秒。
     const settleUntil = Date.now() + 18_000;
     while (Date.now() < settleUntil) {
-      const t = await pageVisibleTextDeep(page, 8000);
+      const t = await read((p) => pageVisibleTextDeep(p, 8000));
       if (platform.doneKeywords.some((k) => t.includes(k))) break;
-      if ((await findCandidateButtonsDeep(page, platform.keywords)).length) break;
+      if ((await read((p) => findCandidateButtonsDeep(p, platform.keywords))).length) break;
       await sleep(1000);
     }
 
     // 4) 先确认今天没签过，能不点就不点（必须连 iframe 一起读，Qoder 的活动面板在 iframe 里）
-    let text = await pageVisibleTextDeep(page);
+    let text = await read((p) => pageVisibleTextDeep(p));
     const doneHit = platform.doneKeywords.find((k) => text.includes(k));
     if (doneHit) return { status: 'already', detail: `页面显示「${doneHit}」，今天已完成` };
     if (doneRuleHit(text, platform.doneRule)) {
@@ -704,15 +1045,16 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     }
 
     if (dryRun) {
-      const cands = await findCandidateButtonsDeep(page, platform.keywords);
+      const cands = await read((p) => findCandidateButtonsDeep(p, platform.keywords));
       let selHit = null;
       for (const sel of platform.clickSelectors) {
         try {
-          if (await page.locator(sel).first().isVisible({ timeout: 800 })) {
+          if (await read((p) => p.locator(sel).first().isVisible({ timeout: 800 }))) {
             selHit = sel;
             break;
           }
-        } catch {
+        } catch (e) {
+          if (e?.code === 'CHECKIN_PAGE_GONE') throw e;
           /* next */
         }
       }
@@ -726,19 +1068,25 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     if (platform.clickSelectors.length) {
       for (const sel of platform.clickSelectors) {
         try {
-          const loc = page.locator(sel).first();
-          if (await loc.isVisible({ timeout: 1200 })) {
-            logger?.step?.(`命中选择器 ${sel}，点击`);
-            await loc.click({ timeout: 5000 });
-            await sleep(1500);
-            const t3 = await pageVisibleText(page, 4000);
-            const o3 = readOutcome(t3);
-            if (o3.already) return { status: 'already', detail: '点击后提示已完成' };
-            if (o3.success) return { status: 'success', detail: '点击后出现成功提示' };
-            if (o3.fail) return { status: 'failed', detail: '点击后出现失败提示' };
-            return { status: 'uncertain', detail: `已点击入口按钮，未能确认结果` };
-          }
-        } catch {
+          const clicked = await act(async (p) => {
+            const loc = p.locator(sel).first();
+            if (await loc.isVisible({ timeout: 1200 })) {
+              logger?.step?.(`命中选择器 ${sel}，点击`);
+              clickedOnce = true;
+              await loc.click({ timeout: 5000 });
+              await sleep(1500);
+              const t3 = await pageVisibleText(p, 4000);
+              const o3 = readOutcome(t3);
+              if (o3.already) return { status: 'already', detail: '点击后提示已完成' };
+              if (o3.success) return { status: 'success', detail: '点击后出现成功提示' };
+              if (o3.fail) return { status: 'failed', detail: '点击后出现失败提示' };
+              return { status: 'uncertain', detail: `已点击入口按钮，未能确认结果` };
+            }
+            return null;
+          });
+          if (clicked) return clicked;
+        } catch (e) {
+          if (e?.code === 'CHECKIN_PAGE_GONE') throw e;
           /* 换下一个 */
         }
       }
@@ -746,14 +1094,19 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     }
 
     // 6) 文案匹配点击（与网页端同一套逻辑）
-    const login = await detectLoginWall(page, text);
+    const login = await read((p) => detectLoginWall(p, text));
     if (login.needLogin) return { status: 'needs_login', detail: login.reason };
 
-    let res = await clickFirstCandidate(page, platform.keywords, logger, { label: platform.name });
+    clickedOnce = true; // clickFirstCandidate 内部会点击：从这里起页面再被关掉，只能报「结果待确认」
+    let res = await act((p) => clickFirstCandidate(p, platform.keywords, logger, { label: platform.name }));
+    // 已经点过候选按钮、只是页面没变化：不能再点第二次（可能重复领取），如实报待确认
+    if (!res.clicked && res.tried?.length) {
+      return { status: 'uncertain', detail: `已点击「${res.tried[0]}」，页面没有变化，结果待确认（请在客户端里看一眼）` };
+    }
     if (!res.clicked) {
       logger?.step?.('首次未找到入口，等 3 秒重试（异步内容可能晚到）');
       await sleep(3000);
-      res = await clickFirstCandidate(page, platform.keywords, logger, { label: platform.name });
+      res = await act((p) => clickFirstCandidate(p, platform.keywords, logger, { label: platform.name }));
     }
     const out = res.outcome || {};
     if (out.already) return { status: 'already', detail: `点击后提示已完成（${res.text}）` };
@@ -761,10 +1114,10 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     if (out.fail) return { status: 'failed', detail: `点击「${res.text}」后出现失败提示` };
     if (res.clicked) {
       await sleep(1800);
-      const t2 = await pageVisibleTextDeep(page, 5000);
+      const t2 = await read((p) => pageVisibleTextDeep(p, 5000));
       const o2 = readOutcome(t2);
       const doneHit2 = platform.doneKeywords.find((k) => t2.includes(k));
-      const stillThere = (await findCandidateButtonsDeep(page, platform.keywords)).length > 0;
+      const stillThere = (await read((p) => findCandidateButtonsDeep(p, platform.keywords))).length > 0;
       const ruleDone = doneRuleHit(t2, platform.doneRule);
       // iframe 场景必须以「同一 frame 内的精确按钮」判断入口是否还在。
       // 旧逻辑只查主文档（永远 0 个候选），把「根本没点到」误报成「入口已消失」。
@@ -786,9 +1139,15 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
     }
     return { status: 'not_found', detail: `页面上没有命中关键词的按钮：${platform.keywords.join('/')}` };
   } catch (e) {
+    const pageDead = e?.code === 'CHECKIN_PAGE_GONE' || CLIENT_PAGE_DEAD.test(String(e?.message || e));
+    // 已经点过领取按钮之后页面才没了：可能已经领到，不能报失败也不能重跑，交给用户确认
+    if (pageDead && clickedOnce) return { status: 'uncertain', detail: '已点击领取，随后客户端关掉了签到页，结果待确认（请在客户端里看一眼今天是否已签到）' };
+    if (pageDead) return { status: 'error', detail: '客户端把签到页关掉了，下次再试' };
     return { status: 'error', detail: firstLine(e?.message || e) };
   } finally {
     if (page && shotDir) await snapshot(page, shotDir, platform.id).catch(() => null);
+    // 不管 keepRunning 与否，我们开的标签页都要关掉；用户自己的窗口绝不动
+    if (openedByUs && page && !page.isClosed()) await page.close().catch(() => null);
     try {
       browser.close?.();
     } catch {
@@ -802,4 +1161,57 @@ export async function runClientCheckin(platform, { logger, shotDir, dryRun = fal
       logger?.info?.(`${platform.name} 原本就在运行，签到后保持运行不关闭`);
     }
   }
+}
+
+/* ======================================================================
+ * client-open：只替用户把客户端打开，不接管、不读登录态
+ * ======================================================================
+ * Loomy 这类正式版会剥掉 --remote-debugging-port（连环境变量也忽略），CDP 接不上、
+ * 积分页也读不到。铁律：绝不读它的登录文件/令牌，绝不报「已到账」这种假成功。
+ */
+export async function runClientOpen(platform, { logger, dryRun = false } = {}) {
+  const probe = clientProbe(platform);
+  const exe = probe.exe && !probe.launcherOnly ? probe.exe : '';
+  if (!exe) {
+    return {
+      status: 'not_installed',
+      detail: `没有找到 ${platform.name} 主程序；装在非默认目录的话，在 ~/.free-token/checkin/config.json 的 platforms.${platform.id}.app 填 exe 完整路径`,
+    };
+  }
+
+  const running = await isClientRunning(exe);
+  if (dryRun) {
+    return {
+      status: 'dry_run',
+      detail: running
+        ? `已找到 ${platform.name}，正在运行（检测不启动客户端）`
+        : `已找到 ${platform.name}：${exe}（检测不启动客户端）`,
+    };
+  }
+  if (running) {
+    return {
+      status: 'uncertain',
+      detail: `${platform.name} 已在运行；它登录状态下每天打开会自动刷新每日积分。正式版禁止外部接管，控制台无法读取「设置 → 积分详情」核实，请自己看一眼今天有没有到账`,
+    };
+  }
+
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE; // 不删这个 Electron 会以纯 Node 模式启动并秒退
+  delete env.NODE_OPTIONS;
+  logger?.info?.(`启动 ${platform.name}：${exe}`);
+  const child = spawn(exe, [], { detached: true, stdio: 'ignore', env });
+  child.on('error', () => {});
+  child.unref(); // 只打开一次，永远不关闭这个客户端
+
+  const t0 = Date.now();
+  while (Date.now() - t0 < 30_000) {
+    if (await isClientRunning(exe)) {
+      return {
+        status: 'uncertain',
+        detail: `已打开 ${platform.name} 客户端（不会自动关闭）。登录状态下每日积分会自动刷新；正式版禁止外部接管，控制台无法读取「设置 → 积分详情」核实，请自己看一眼`,
+      };
+    }
+    await sleep(1500);
+  }
+  return { status: 'error', detail: `启动 ${platform.name} 失败（30 秒内没看到进程）` };
 }

@@ -18,9 +18,11 @@ export interface Guide {
   steps: GuideStep[];
   /** 可选提示：踩坑点、失败原因、风险说明 */
   tips?: string[];
+  /** 可选：附带一段可复制的长文本（例如给 AI 的提示词），弹窗里带「复制」按钮 */
+  prompt?: { title: string; desc?: string; text: string };
 }
 
-export type GuideKey = 'accounts' | 'models' | 'keys' | 'quota' | 'proxy' | 'stats' | 'credits' | 'settings' | 'netcheckin';
+export type GuideKey = 'accounts' | 'models' | 'keys' | 'quota' | 'proxy' | 'stats' | 'credits' | 'settings' | 'netcheckin' | 'zcode';
 
 export const GUIDES: Record<GuideKey, Guide> = {
   accounts: {
@@ -192,6 +194,86 @@ export const GUIDES: Record<GuideKey, Guide> = {
       },
     ],
     tips: ['官方接口偶发限流时会提示查询失败，稍等再刷新；本地缓存只影响展示速度，不影响数据准确性。'],
+  },
+
+  zcode: {
+    title: 'ZCode 管理使用指南',
+    subtitle: '多个 ZCode 账号一键切换、看 Token 与免费额度、把 ZCode 当 OpenAI 接口给别的 agent 用',
+    steps: [
+      {
+        title: '导入账号',
+        desc: '在 ZCode 客户端登录（z.ai 账号），回到「账号切换」点「导入当前登录态」；没登录过点「扫码登录」会打开官方登录页。凭据快照加密存本机，不上传。',
+      },
+      {
+        title: '切换账号',
+        desc: '账号卡片点「切换账号」，会自动结束 ZCode 进程并写入目标账号登录态，然后点「启动 ZCode」或自己打开客户端即可。为防风控 3 分钟内只能切一次。',
+      },
+      {
+        title: '看额度',
+        desc: '「额度统计」页读取官方免费套餐余额、各额度桶和到期时间；账号卡片也会显示上次读到的额度。读失败多半是登录凭据过期：打开 ZCode 客户端随便对话一次再刷新。',
+      },
+      {
+        title: '看 Token',
+        desc: '「Token 统计」读取 ZCode 本机数据库，按天/按模型统计，不联网。',
+      },
+      {
+        title: '反向代理',
+        desc: '在「反向代理」页开启后，别的 agent 用 OpenAI 协议、base_url 填页面显示的地址、api_key 填页面上的 Key 即可调用；「测试上游连通」能确认免费通道是否可用。',
+      },
+      {
+        title: '客户端开关',
+        desc: '「ZCode 设置」里的开关直接写回 ZCode 的设置文件，重启 ZCode 后生效。',
+      },
+      {
+        title: '领到免费额度卡后通道不通',
+        desc: '看下面「让 AI 修复通道」，把提示词复制给你自己的 AI（WorkBuddy、DSH、Claude Code 等能读写本机文件的 agent）。',
+      },
+    ],
+    tips: [
+      'ZCode 免费套餐（Start Plan / 免费额度卡）官方不允许接第三方客户端，反向代理属于第三方使用，有被风控暂停的风险（曾出现 405 / code 3012），请自行评估。',
+      '出现 429 或 code 3008 是请求太快或并发超限：调大「最小请求间隔」，不要连续重试。',
+      '凭据只在本机使用，控制台不会把 token 发给除 ZCode 官方以外的任何地方。',
+    ],
+    prompt: {
+      title: '让 AI 修复通道（复制给你的 AI）',
+      desc: '领到 ZCode 免费额度卡、在客户端左下角切到免费通道并选好免费模型后，如果本控制台的反向代理 / 额度读取还是不通，把下面整段复制给你自己的 AI。⚠ 这段流程作者还没在新卡上实测过。',
+      text: `你是我电脑上的 AI 助手。请帮我检查并修复「workbuddy控制台」里 ZCode 免费通道（反向代理 /v1z 与额度读取），让它用上我刚领到的 ZCode 免费额度。严格按下面做，每步做完用一两句话告诉我结果。
+
+
+1. 任何 token、Key、Cookie、密码、邮箱、手机号都不许打印到屏幕、写进日志或发给任何人/任何网站；需要确认时只说「有/没有」「长度 N」或只显示前 4 位。
+2. 不许把凭据文件上传、复制到别处或提交到 git。
+3. 只能用免费模型（例如 GLM-5.3-Flash 这类标注免费/Free 的），不许切到任何收费模型、不许充值、不许走按量计费的 API Key 通道。
+4. 遇到 HTTP 405 + code 3012（第三方使用风控）、HTTP 429 或 code 3008（并发/频率超限）：立刻停止，不要重试刷请求，把原始错误码告诉我。最多只发 3 次测试请求。
+5. 改任何配置文件之前，先把原文件复制一份.bak 备份；只改和 ZCode 通道有关的项。
+
+
+- ZCode 客户端是否已安装、版本号是多少（安装目录里的 resources\\app 或 package.json 的 version；控制台要求 ≥ 3.17.2）。
+- 客户端是否已登录、左下角免费额度卡是否已领取，当前对话是否已切到免费通道并选了免费模型（这一步请我截图或口头确认，你不要去点客户端）。
+- 在客户端里用免费模型随便发一句话，确认客户端自己能正常回复（客户端都不通，就不是控制台的问题，告诉我后停止）。
+
+
+- 登录凭据：%USERPROFILE%\\.zcode\\v2\\credentials.json（存在即可；里面是加密的，主密钥在 Windows 凭据管理器里，不要尝试导出）。
+- 客户端数据：%APPDATA%\\ZCode（看 setting.json 是否存在、能否解析）。
+- 本地数据库：%USERPROFILE%\\.zcode\\cli\\db\\db.sqlite（Token 统计用，存在即可）。
+- 控制台数据：%USERPROFILE%\\.free-token\\config.json 里的 zcodeProxy 段（enabled 是否为 true；apiKey 只说有没有）。
+- 如果 ZCode 装在非默认目录，可以设置环境变量 ZCODE_INSTALL_DIR 指向安装目录，然后重启控制台。
+
+
+- GET /api/zcode/state：看 credentialOk 是否为 true、clientVersion 是否读到。
+- GET /api/zcode/balance?refresh=1：能否读到免费套餐余额（只告诉我剩余额度数字和到期时间）。
+· 401/403：凭据过期 → 让我在客户端里对话一次（会刷新凭据），再重试一次。
+- GET /api/zcode/upstream-test：免费通道连通测试。
+· 成功：告诉我回复内容和用量，结束。
+· 405 / 3012：按红线第 4 条停止。常见原因是请求没有按 ZCode 官方客户端的格式发送（缺客户端标识请求头、版本号太低、缺官方系统提示块）。检查控制台 server\\zcode\\gift.mjs 里客户端版本号是否 ≥ 当前客户端版本，必要时只把版本号改成和本机客户端一致，改完重启控制台再测一次。
+· 429 / 3008：按红线第 4 条停止，建议我把「反向代理 → 高级设置」里的最小请求间隔调大（例如 3000 毫秒以上）。
+· 走到了旧的 BigModel / open.bigmodel.cn 按量通道：这条会扣付费余额，立刻停止并告诉我。
+
+
+- 在控制台「ZCode 管理 → 反向代理」点「测试上游连通」，应显示「上游连通正常」。
+- 用 OpenAI 兼容方式发一次最小请求（max_tokens 不超过 16），base_url 用页面上显示的地址，api_key 用页面上的 Key（从页面复制，不要打印出来），model 用页面列出的免费模型之一。成功就把回复的第一句和用量告诉我。
+
+用 5 行以内总结：问题出在哪、改了哪些文件（只写文件名）、现在是否已通、还需要我做什么。`,
+    },
   },
 
   settings: {

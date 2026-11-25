@@ -6,6 +6,7 @@ import {
   ConfirmProvider,
   IconDownload,
   IconGrid,
+  IconLayers,
   IconRefresh,
   IconSettings,
   IconShield,
@@ -22,12 +23,15 @@ import type { AccountsResponse, AppUpdateInfo, LoadedInfo } from './lib/types';
 import SettingsPage from './pages/SettingsPage';
 import PlatformPage, { type PlatformTab } from './pages/PlatformPage';
 import WorkBuddyPage, { type WorkBuddyTab } from './pages/WorkBuddyPage';
+import ZCodePage, { type ZCodeTab } from './pages/ZCodePage';
 import NetCheckinPage from './pages/NetCheckinPage';
 
 const WB_TABS: WorkBuddyTab[] = ['accounts', 'stats', 'credits', 'proxy'];
+const ZC_TABS: ZCodeTab[] = ['accounts', 'stats', 'quota', 'proxy', 'zsettings'];
 
 const TABS = [
   { id: 'workbuddy', label: 'WorkBuddy 管理', desc: '账号切换 · Token/积分统计 · 反向代理 · WorkBuddy 设置', icon: IconUsers },
+  { id: 'zcode', label: 'ZCode 管理', desc: '账号切换 · Token/额度统计 · 反向代理 · ZCode 设置', icon: IconLayers },
   { id: 'platform', label: '免费模型', desc: '免费模型 · 平台额度 · API Keys', icon: IconGrid },
   { id: 'netcheckin', label: '全网签到', desc: '其他 AI 平台的每日福利交给控制台代领', icon: IconZap },
   { id: 'settings', label: '设置', desc: '网络代理 · 全网签到自动领取 · 通知历史 · 界面错误日志 · 关于', icon: IconSettings },
@@ -36,25 +40,33 @@ const TABS = [
 type TabId = (typeof TABS)[number]['id'];
 
 /** 旧版地址兼容：曾经是顶级入口的页签，按现在的归属跳到对应子页签 */
-const LEGACY_TABS: Record<string, { tab: TabId; platform: PlatformTab; wb: WorkBuddyTab }> = {
-  accounts: { tab: 'workbuddy', platform: 'models', wb: 'accounts' },
-  models: { tab: 'platform', platform: 'models', wb: 'accounts' },
-  quota: { tab: 'platform', platform: 'quota', wb: 'accounts' },
-  keys: { tab: 'platform', platform: 'keys', wb: 'accounts' },
-  proxy: { tab: 'workbuddy', platform: 'models', wb: 'proxy' },
-  stats: { tab: 'workbuddy', platform: 'models', wb: 'stats' },
-  credits: { tab: 'workbuddy', platform: 'models', wb: 'credits' },
+const LEGACY_TABS: Record<string, { tab: TabId; platform: PlatformTab; wb: WorkBuddyTab; zc: ZCodeTab }> = {
+  accounts: { tab: 'workbuddy', platform: 'models', wb: 'accounts', zc: 'accounts' },
+  models: { tab: 'platform', platform: 'models', wb: 'accounts', zc: 'accounts' },
+  quota: { tab: 'platform', platform: 'quota', wb: 'accounts', zc: 'accounts' },
+  keys: { tab: 'platform', platform: 'keys', wb: 'accounts', zc: 'accounts' },
+  proxy: { tab: 'workbuddy', platform: 'models', wb: 'proxy', zc: 'accounts' },
+  stats: { tab: 'workbuddy', platform: 'models', wb: 'stats', zc: 'accounts' },
+  credits: { tab: 'workbuddy', platform: 'models', wb: 'credits', zc: 'accounts' },
 };
 
 /** 解析当前地址栏 hash → 页签（含子页签，如 #workbuddy/stats）；无法识别时回落到 WorkBuddy 管理 */
-function resolveHash(): { tab: TabId; platform: PlatformTab; wb: WorkBuddyTab } {
+function resolveHash(): { tab: TabId; platform: PlatformTab; wb: WorkBuddyTab; zc: ZCodeTab } {
   const h = location.hash.replace('#', '').replace(/^\/+/, '');
   if (LEGACY_TABS[h]) return LEGACY_TABS[h];
   const [head, sub] = h.split('/');
   if (head === 'workbuddy' && WB_TABS.includes(sub as WorkBuddyTab)) {
-    return { tab: 'workbuddy', platform: 'models', wb: sub as WorkBuddyTab };
+    return { tab: 'workbuddy', platform: 'models', wb: sub as WorkBuddyTab, zc: 'accounts' };
   }
-  return { tab: (TABS.some((t) => t.id === head) ? head : 'workbuddy') as TabId, platform: 'models', wb: 'accounts' };
+  if (head === 'zcode' && ZC_TABS.includes(sub as ZCodeTab)) {
+    return { tab: 'zcode', platform: 'models', wb: 'accounts', zc: sub as ZCodeTab };
+  }
+  return {
+    tab: (TABS.some((t) => t.id === head) ? head : 'workbuddy') as TabId,
+    platform: 'models',
+    wb: 'accounts',
+    zc: 'accounts',
+  };
 }
 
 function currentTab(): TabId {
@@ -270,6 +282,7 @@ export default function App() {
   const [platformTab, setPlatformTab] = useState<PlatformTab>(initial.platform);
   // WorkBuddy 管理页子页签：同理，顶栏账号徽标要能直接跳到「账号切换」
   const [wbTab, setWbTab] = useState<WorkBuddyTab>(initial.wb);
+  const [zcTab, setZcTab] = useState<ZCodeTab>(initial.zc);
   // 访问过的页签保持挂载（仅隐藏），切换不重新加载数据、不丢筛选状态
   const [visited, setVisited] = useState<Set<TabId>>(() => new Set([initial.tab]));
 
@@ -279,6 +292,7 @@ export default function App() {
       setTab(r.tab);
       if (r.tab === 'platform') setPlatformTab(r.platform);
       if (r.tab === 'workbuddy') setWbTab(r.wb);
+      if (r.tab === 'zcode') setZcTab(r.zc);
     };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
@@ -312,7 +326,8 @@ export default function App() {
    * 「免费模型」与「WorkBuddy 管理」都是一个入口多个子页签，按各自的子页签细分，
    * 其余页面按 tab 一一对应；WorkBuddy 设置沿用设置页的指南。
    */
-  const currentGuide: GuideKey = tab === 'platform' ? platformTab : tab === 'workbuddy' ? (wbTab === 'wbsettings' ? 'settings' : wbTab) : tab;
+  const currentGuide: GuideKey =
+    tab === 'platform' ? platformTab : tab === 'workbuddy' ? (wbTab === 'wbsettings' ? 'settings' : wbTab) : tab === 'zcode' ? 'zcode' : tab;
 
   return (
     <ToastProvider>
@@ -337,7 +352,7 @@ export default function App() {
                 return (
                   <button
                     key={t.id}
-                    onClick={() => go(t.id, t.id === 'workbuddy' ? wbTab : undefined)}
+                    onClick={() => go(t.id, t.id === 'workbuddy' ? wbTab : t.id === 'zcode' ? zcTab : undefined)}
                     className={`relative flex items-center gap-2.5 px-3 h-9.5 rounded-xl text-sm transition-all duration-150 ${
                       on ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
                     }`}
@@ -369,7 +384,7 @@ export default function App() {
                 {TABS.map((t) => (
                   <button
                     key={t.id}
-                    onClick={() => go(t.id, t.id === 'workbuddy' ? wbTab : undefined)}
+                    onClick={() => go(t.id, t.id === 'workbuddy' ? wbTab : t.id === 'zcode' ? zcTab : undefined)}
                     className={`px-3 h-8 rounded-xl text-xs whitespace-nowrap transition-colors ${
                       tab === t.id ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-zinc-500 hover:bg-zinc-100'
                     }`}
@@ -402,6 +417,7 @@ export default function App() {
                 {[...visited].map((id) => (
                   <div key={id} className={tab === id ? '' : 'hidden'}>
                     {id === 'workbuddy' && <WorkBuddyPage tab={wbTab} onTabChange={setWbTab} />}
+                    {id === 'zcode' && <ZCodePage tab={zcTab} onTabChange={setZcTab} />}
                     {id === 'platform' && <PlatformPage tab={platformTab} onTabChange={setPlatformTab} />}
                     {id === 'netcheckin' && <NetCheckinPage />}
                     {id === 'settings' && <SettingsPage />}

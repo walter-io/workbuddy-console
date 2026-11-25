@@ -1,3 +1,5 @@
+> **本仓库是给原作者 walter-io 的改进贡献**，改了什么、哪些还没实测见 [改进说明.md](./改进说明.md)。以下为原 README。
+
 <p align="center">
   <img src="assets/cover.png" alt="workbuddy控制台 — 账号 · 模型 · 用量" width="100%" />
 </p>

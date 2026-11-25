@@ -175,6 +175,7 @@ export default function ModelsPage({ active = true, onGoKeys }: { active?: boole
     setRefreshing(true);
     try {
       const r = await get<ModelsResponse>(`/api/models?platform=${encodeURIComponent(pf)}${force ? '&refresh=1' : ''}`, { timeoutMs: TIMEOUT.models });
+      if ((r as any).needsKey) throw new Error((r as any).error || '需要配置 API Key');
       modelsCache.set(pf, { data: r, at: Date.now() });
       if (platformRef.current === pf) {
         setData(r);

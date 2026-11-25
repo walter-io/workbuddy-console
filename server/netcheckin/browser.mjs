@@ -117,6 +117,37 @@ let pw = null;
 const contexts = new Map();
 
 /**
+ * Chromium 重启会清掉会话 cookie，很多站的登录凭据正是会话 cookie；
+ * 不转成持久的话登录窗口一关、下次检测就是未登录（2026-11-24 华为云码道实测）。
+ */
+export async function persistSessionCookies(ctx, days = 30) {
+  try {
+    const all = await ctx.cookies().catch(() => []);
+    let converted = 0;
+    for (const c of all) {
+      if (!(c.expires === -1 || c.expires == null || c.expires <= 0)) continue;
+      const { name, value, domain, path, httpOnly, secure, sameSite } = c;
+      const cookie = {
+        name,
+        value,
+        domain,
+        path,
+        expires: Math.floor(Date.now() / 1000) + days * 86400,
+        httpOnly,
+        secure,
+        sameSite,
+      };
+      if ('partitionKey' in c) cookie.partitionKey = c.partitionKey;
+      const saved = await ctx.addCookies([cookie]).then(() => true).catch(() => null);
+      if (saved) converted++;
+    }
+    return converted;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * 打开（或复用）key 平台的持久化上下文。调用方必须持有 lockFor(key)。
  * headless 参数只在首开时生效；复用时以已开实例为准（调用方按返回值感知）。
  */
@@ -129,6 +160,7 @@ export async function acquireContext(key, { headless = true, logger, proxy } = {
   // 模式变了（比如无头运行中来了一个去登录请求）：先关掉旧的再重开
   if (cur) {
     logger?.info?.('切换浏览器模式，先关闭当前实例');
+    await persistSessionCookies(cur.ctx).catch(() => 0);
     await cur.ctx.close().catch(() => null);
     contexts.delete(key);
   }
@@ -198,6 +230,7 @@ export async function releaseContext(key) {
   contexts.delete(key);
   const c = cur.ctx;
   // 关闭时 playwright 才把 cookie/localStorage 刷进 profile，这步不能省
+  await persistSessionCookies(c).catch(() => 0);
   await c.close().catch(() => null);
 }
 

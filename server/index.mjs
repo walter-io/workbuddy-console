@@ -97,6 +97,8 @@ const app = express();
 // /v1 与 /v1beta 是两个独立前缀（前者不含后者），Gemini 原生协议走 /v1beta，需单独挂。
 app.use('/v1', express.json({ limit: '12mb' }));
 app.use('/v1beta', express.json({ limit: '12mb' }));
+// ZCode 反代同族：大上下文 agent 请求 >1MB 会直接 413，与 /v1 同待遇
+app.use('/v1z', express.json({ limit: '12mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 const wrap = (fn) => (req, res) => {
@@ -382,7 +384,26 @@ app.get(
     const provider = platformFromReq(req);
     const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
     const key = activeKeyFor(loadConfig(), provider.id);
-    const data = await provider.getModels({ refresh, apiKey: key?.key || undefined, baseUrl: key?.baseUrl || undefined });
+    let data;
+    try {
+      data = await provider.getModels({ refresh, apiKey: key?.key || undefined, baseUrl: key?.baseUrl || undefined });
+    } catch (err) {
+      // 没配 Key 是正常状态，不是服务器错误：返回 200 + needsKey，前端照旧显示提示卡片
+      if (String(err?.message || err).includes('需要配置 API Key')) {
+        return res.json({
+          needsKey: true,
+          error: err.message,
+          models: [],
+          count: 0,
+          fetchedAt: Date.now(),
+          platform: provider.id,
+          platformName: provider.name,
+          note: provider.note,
+          tutorialUrl: provider.tutorialUrl || null,
+        });
+      }
+      throw err;
+    }
     res.json({ ...data, platform: provider.id, platformName: provider.name, note: provider.note, tutorialUrl: provider.tutorialUrl || null });
   })
 );
@@ -2060,6 +2081,12 @@ app.get(
 startNetCheckinScheduler();
 
 
+
+/* ---------------- ZCode管理（账号切换 · Token统计 · 反向代理 · ZCode设置） ---------------- */
+
+// 必须挂在静态资源与 SPA 兜底之前；registerZcodeRoutes 内部再挂 /v1z/* 数据面
+import { registerZcodeRoutes } from './zcode/routes.mjs';
+registerZcodeRoutes(app, { port: PORT, wrap });
 /* ---------------- 反向代理（OpenAI 兼容，供其他 agent 调用） ---------------- */
 
 // 必须挂在静态资源与 SPA 兜底之前，否则 /v1/* 会被 index.html 吃掉

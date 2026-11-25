@@ -51,12 +51,13 @@ export function nextWindowAt() {
   const cfg = loadConfig();
   if (!cfg.schedule.enabled) return null;
   let day = new Date();
-  let next = todayAt(cfg.schedule.time, day);
-  if (next.getTime() <= Date.now()) {
+  // 先算上当日随机延迟再判断是否已过：否则「设定时间过了、延迟还没到」会被误显示成明天
+  let next = todayAt(cfg.schedule.time, day).getTime() + dailyJitterMs(cfg, day);
+  if (next <= Date.now()) {
     day = new Date(day.getTime() + 86_400_000);
-    next = todayAt(cfg.schedule.time, day);
+    next = todayAt(cfg.schedule.time, day).getTime() + dailyJitterMs(cfg, day);
   }
-  return next.getTime() + dailyJitterMs(cfg, next);
+  return next;
 }
 
 async function tick({ startupCatchUp = false } = {}) {
