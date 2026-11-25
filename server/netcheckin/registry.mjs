@@ -121,12 +121,27 @@ export const BUILTIN_PLATFORMS = [
     doneKeywords: ['已签到', '今日已签到', '明日再来', '今日已领'],
     notes: '需要先安装 Trae 国内版并登录（国际版没有此活动）；领取入口在左下角头像菜单，工具会临时接管客户端完成点击。',
   },
-  // Qoder 国内版（qoder-cn）：2026-11-21 移入 MANUAL_PLATFORMS（羊毛情报）。客户端 0.5.x
-  // 改版后每日领取入口整体下架——11-19 起连续 9 天 not_found，实测新版客户端：
-  // Credits 标签只剩用量热力图、用量面板只剩「查看详情」（外跳系统浏览器）、
-  // 刷新页面抓不到任何 campaign/claim 接口流量。若活动恢复，旧的接管配置是：
-  // port 9224 / cdpMode arg / clickSelectors [class*="gift"] 等 / 入口在左下角用量面板。
-  // 用户配置里遗留的 platforms.qoder-cn / logins.qoder-cn 会被自动忽略，历史记录仍留在流水里。
+  {
+    id: 'qoder-cn',
+    name: 'Qoder 国内版',
+    kind: 'client',
+    category: 'code',
+    engine: 'client-cdp',
+    defaultEnabled: false,
+    reward: '100 Credits/天',
+    app: KNOWN_CLIENT_PATHS.qoder[0],
+    appCandidates: KNOWN_CLIENT_PATHS.qoder,
+    homepage: 'https://qoder.com/',
+    port: 9224,
+    cdpMode: 'arg',
+    clickSelectors: ['[class*="gift"]', '[class*="Gift"]', '[class*="check-in"]', '[class*="checkin"]'],
+    keywords: ['领取', '签到', '立即领取'],
+    doneKeywords: ['已领取', '已经领过', '明日再来', '明天再来', '今日已领', '领取成功', '已签到'],
+    notes: '需要先安装 Qoder 国内版并登录；领取入口在左下角用量面板的礼物图标。额度窗口是每天 10:00 到次日 10:00，错过不补。',
+  },
+  // Qoder 国内版（qoder-cn）：2026-11-21 曾因客户端改版下架移入羊毛情报，2026-11-25 应用户要求恢复代领。
+  // 客户端 0.5.x 改版后领取入口长期 not_found（11-19 起连续 9 天实测）；若活动恢复，接管配置即上方条目。
+  // 用户配置里遗留的 platforms.qoder-cn / logins.qoder-cn 恢复有效，历史记录仍留在流水里。
   // 智谱清言（zhipu）：2026-11 移入 MANUAL_PLATFORMS（羊毛情报）。积分是登录自动到账、
   // 每日刷新的额度，没有值得维护的「代领」动作；zhipu-api 专用引擎与登录判定一并移除。
   // 用户配置里遗留的 platforms.zhipu / logins.zhipu 会被自动忽略，历史记录仍留在流水里。
