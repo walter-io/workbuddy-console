@@ -281,7 +281,10 @@
       if (e.button !== 0) return;
       // R005-9：排除集与展开点击一致（补 .cursor-pointer）
       if (e.target.closest('button, a, input, select, textarea, [role=tab], .cursor-pointer')) return;
-      if (e.clientY - card.getBoundingClientRect().top > 34 && e.target === card) return;
+      // 文本选择优先：内容区（卡片的子元素，含文字/图表/表格等）按下一律放行原生文本选择，
+      // 不进入拖拽、不 preventDefault；只有按下点落在卡片自身的空白区（padding/边缘）才拖拽
+      if (e.target !== card) return;
+      if (e.clientY - card.getBoundingClientRect().top > 34) return;
       e.preventDefault();
       const startX = e.clientX, startY = e.clientY;
       const or = card.getBoundingClientRect();
