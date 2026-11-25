@@ -63,10 +63,14 @@ function summarize(values) {
   let userId = '';
   let name = '';
   try {
-    const ui = JSON.parse(values['oauth:zai_cn:user_info'] || '{}');
-    email = ui.email || '';
-    name = ui.name || '';
-    userId = ui.user_id || '';
+    // ZCode 3.x 用 oauth:zai_cn:user_info；4.x 改写成 oauth:bigmodel:user_info，
+    // 且把 user_id/email/name 藏在 rawProfile 里。两种形态都要认，否则导入永远报「未读到有效登录态」。
+    const raw = values['oauth:zai_cn:user_info'] || values['oauth:zai:user_info'] || values['oauth:bigmodel:user_info'] || '{}';
+    const ui = JSON.parse(raw);
+    const profile = ui.rawProfile || {};
+    email = ui.email || profile.email || '';
+    name = ui.name || ui.displayName || profile.name || '';
+    userId = ui.user_id || ui.userId || ui.id || profile.user_id || '';
   } catch {
     /* user_info 缺失时按空处理 */
   }

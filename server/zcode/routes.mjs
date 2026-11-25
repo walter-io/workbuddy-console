@@ -31,6 +31,13 @@ let lastSwitchAt = 0;
 const SWITCH_COOLDOWN_MS = 180_000;
 
 export function registerZcodeRoutes(app, { port, wrap }) {
+  // 凭据文件变化（扫码登录 / 客户端换号）时：通知反代刷新，并把当前登录态幂等写入账号库。
+  // 之前监视器只做通知，导致「扫码登录成功后账号库仍然为空」，必须手动点导入。
+  const onZcodeCredentialChange = (state) => {
+    try { notifyZcodeCredentialChange(state); } catch { /* 通知失败不影响入库 */ }
+    void importCurrentAccount('').catch(() => { /* 登录态暂不可解时等下次变化再试 */ });
+  };
+  startZcodeCredentialWatcher(onZcodeCredentialChange);
 
   // 总状态：账号库 + 当前登录态 + 进程 + 上游版本
   app.get('/api/zcode/state', wrap(async (req, res) => {
@@ -152,15 +159,48 @@ export function registerZcodeRoutes(app, { port, wrap }) {
   }));
 
   // 启动 ZCode 客户端（已在运行就不重复拉起）
+  // 注意：spawn 成功返回 ≠ 客户端真的起来了（GUI 程序可能因会话/权限直接退出）。
+  // 这里实际轮询进程，失败时用 Explorer 走系统 Shell 再兜底一次，并把真实结果返回给前端。
   app.post('/api/zcode/launch', wrap(async (req, res) => {
     const exe = findZcodeExe();
     if (!exe) {
       return res.status(404).json({ error: '没找到 ZCode 安装位置：请先安装 ZCode，或设置环境变量 ZCODE_INSTALL_DIR 指向安装目录' });
     }
     const proc = await detectZcodeProcess();
-    if (proc.running) return res.json({ ok: true, already: true });
-    spawn(exe, [], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
-    res.json({ ok: true, exe });
+    if (proc.running) return res.json({ ok: true, already: true, pids: proc.pids });
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const waitRunning = async (rounds) => {
+      for (let i = 0; i < rounds; i++) {
+        await sleep(500);
+        const p = await detectZcodeProcess();
+        if (p.running) return p;
+      }
+      return null;
+    };
+
+    let spawnError = null;
+    try {
+      const child = spawn(exe, [], { detached: true, stdio: 'ignore', windowsHide: false });
+      child.on('error', (e) => { spawnError = String(e?.message || e); });
+      child.unref();
+    } catch (e) {
+      spawnError = String(e?.message || e);
+    }
+    let running = await waitRunning(6); // 最多 3 秒
+    if (!running && process.platform === 'win32') {
+      // GUI 程序从服务进程直接拉起可能立刻退出；交给 Explorer 用系统 Shell 打开一次。
+      try {
+        spawn('explorer.exe', [exe], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      } catch { /* 兜底失败时仍返回下面的明确错误 */ }
+      running = await waitRunning(6);
+    }
+    if (!running) {
+      throw Object.assign(new Error(
+        'ZCode 进程没有起来（' + (spawnError || '启动后立即退出') + '）。请手动双击 ' + exe + ' 启动后再试'
+      ), { status: 500 });
+    }
+    res.json({ ok: true, exe, pids: running.pids });
   }));
 
   // 显示反代 Key 明文（仅给本机页面用；服务只监听 127.0.0.1，且已有 Host 头本机校验）
@@ -178,10 +218,8 @@ export function registerZcodeRoutes(app, { port, wrap }) {
   }));
 
   app.get('/api/zcode/settings', wrap(async (req, res) => {
-    startZcodeCredentialWatcher((state) => {
-      // ZCode 登录态变化（账号换号/重新登录）：标记待重载，反代下一次请求自动用新凭据
-      try { notifyZcodeCredentialChange(state); } catch {}
-    });
+    // watcher 在路由注册时已启动（含自动入库），这里再调一次仅作幂等兜底
+    startZcodeCredentialWatcher(onZcodeCredentialChange);
     const base = readZcodeSettings();
     const proc = await detectZcodeProcess();
     const cv = zcodeClientVersion();
