@@ -36,3 +36,4 @@ checkin/
 profiles/
 *.jsonl
 scripts/*.png
+_pre-merge-backup/

@@ -117,7 +117,7 @@ function PlatformRow({
       <div className="flex items-center gap-3.5 px-4 py-3.5 transition-colors hover:bg-zinc-50/70">
         {/* 头像块：点它进平台页签 */}
         <button onClick={() => onOpen(p.id)} title={`查看 ${p.name} 的详情`} className="shrink-0 outline-none">
-          <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-[15px] font-semibold ${avatarCls(p.id)} transition-transform active:scale-95`}>
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-[15px] font-semibold ${avatarCls(p.id)}`}>
             {p.name.slice(0, 1)}
           </div>
         </button>
@@ -204,7 +204,7 @@ function PlatformRow({
               target="_blank"
               rel="noreferrer"
               title={p.kind === 'client' ? `前往 ${p.name} 的下载页` : `打开 ${p.name} 的官网（含登录入口）`}
-              className="inline-flex h-6 items-center gap-1 rounded-xl bg-white px-2 text-[11px] text-zinc-700 border border-zinc-200 shadow-sm shadow-zinc-900/5 transition-all duration-150 hover:bg-zinc-50 hover:border-zinc-300 active:scale-[0.98]"
+              className="inline-flex h-6 items-center gap-1 rounded-xl bg-white px-2 text-[11px] text-zinc-700 border border-zinc-200 shadow-sm shadow-zinc-900/5 transition-all duration-150 hover:bg-zinc-50 hover:border-zinc-300"
             >
               <IconExternalLink className="w-3 h-3" />
               {p.kind === 'client' ? '下载' : '官网'}
@@ -492,7 +492,7 @@ function ManualSection({ platforms }: { platforms: NetState['manualPlatforms'] }
                 target="_blank"
                 rel="noreferrer"
                 title={`打开 ${m.name} 官网`}
-                className="inline-flex h-6 items-center gap-1 rounded-xl bg-white px-2 text-[11px] text-zinc-700 border border-zinc-200 shadow-sm shadow-zinc-900/5 transition-all duration-150 hover:bg-zinc-50 hover:border-zinc-300 active:scale-[0.98] shrink-0"
+                className="inline-flex h-6 items-center gap-1 rounded-xl bg-white px-2 text-[11px] text-zinc-700 border border-zinc-200 shadow-sm shadow-zinc-900/5 transition-all duration-150 hover:bg-zinc-50 hover:border-zinc-300 shrink-0"
               >
                 <IconExternalLink className="w-3 h-3" />
                 官网

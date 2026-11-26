@@ -4,12 +4,14 @@ import {
   Button,
   Card,
   ConfirmProvider,
+  IconBox,
   IconDownload,
   IconGrid,
   IconLayers,
   IconRefresh,
   IconSettings,
   IconShield,
+  IconSparkles,
   IconUsers,
   IconWarning,
   IconZap,
@@ -25,12 +27,16 @@ import PlatformPage, { type PlatformTab } from './pages/PlatformPage';
 import WorkBuddyPage, { type WorkBuddyTab } from './pages/WorkBuddyPage';
 import ZCodePage, { type ZCodeTab } from './pages/ZCodePage';
 import NetCheckinPage from './pages/NetCheckinPage';
+import DoubaoPage from './pages/DoubaoPage';
+import LoomyPage from './pages/LoomyPage';
 
 const WB_TABS: WorkBuddyTab[] = ['accounts', 'stats', 'credits', 'proxy'];
 const ZC_TABS: ZCodeTab[] = ['accounts', 'stats', 'quota', 'proxy', 'zsettings'];
 
 const TABS = [
   { id: 'workbuddy', label: 'WorkBuddy 管理', desc: '账号切换 · Token/积分统计 · 反向代理 · WorkBuddy 设置', icon: IconUsers },
+  { id: 'doubao', label: '豆包管理', desc: '豆包每日签到 · 积分/连续天数 · 领取记录 · 客户端管理', icon: IconSparkles },
+  { id: 'loomy', label: 'Loomy 管理', desc: 'Loomy 反向代理 · 免费积分 · 请求日志', icon: IconBox },
   { id: 'zcode', label: 'ZCode 管理', desc: '账号切换 · Token/额度统计 · 反向代理 · ZCode 设置', icon: IconLayers },
   { id: 'platform', label: '免费模型', desc: '免费模型 · 平台额度 · API Keys', icon: IconGrid },
   { id: 'netcheckin', label: '全网签到', desc: '其他 AI 平台的每日福利交给控制台代领', icon: IconZap },
@@ -327,7 +333,15 @@ export default function App() {
    * 其余页面按 tab 一一对应；WorkBuddy 设置沿用设置页的指南。
    */
   const currentGuide: GuideKey =
-    tab === 'platform' ? platformTab : tab === 'workbuddy' ? (wbTab === 'wbsettings' ? 'settings' : wbTab) : tab === 'zcode' ? 'zcode' : tab;
+    tab === 'platform'
+      ? platformTab
+      : tab === 'workbuddy'
+        ? wbTab === 'wbsettings' ? 'settings' : wbTab
+        : tab === 'zcode'
+          ? 'zcode'
+          : tab === 'doubao'
+            ? 'netcheckin'
+            : tab;
 
   return (
     <ToastProvider>
@@ -419,6 +433,8 @@ export default function App() {
                     {id === 'workbuddy' && <WorkBuddyPage tab={wbTab} onTabChange={setWbTab} />}
                     {id === 'zcode' && <ZCodePage tab={zcTab} onTabChange={setZcTab} />}
                     {id === 'platform' && <PlatformPage tab={platformTab} onTabChange={setPlatformTab} />}
+                    {id === 'doubao' && <DoubaoPage />}
+                    {id === 'loomy' && <LoomyPage />}
                     {id === 'netcheckin' && <NetCheckinPage />}
                     {id === 'settings' && <SettingsPage />}
                   </div>

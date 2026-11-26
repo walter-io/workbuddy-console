@@ -22,7 +22,7 @@ export interface Guide {
   prompt?: { title: string; desc?: string; text: string };
 }
 
-export type GuideKey = 'accounts' | 'models' | 'keys' | 'quota' | 'proxy' | 'stats' | 'credits' | 'settings' | 'netcheckin' | 'zcode';
+export type GuideKey = 'accounts' | 'models' | 'keys' | 'quota' | 'proxy' | 'stats' | 'credits' | 'settings' | 'netcheckin' | 'zcode' | 'loomy';
 
 export const GUIDES: Record<GuideKey, Guide> = {
   accounts: {
@@ -300,6 +300,35 @@ export const GUIDES: Record<GuideKey, Guide> = {
     tips: [
       '配置保存在 ~/.free-token/config.json，账号在 ~/.wb-switch，换机器时把这两个目录一起带走即可。',
       '「界面错误日志」是本地前端报错记录，遇到界面异常先把这里的内容发给开发者。',
+    ],
+  },
+
+  loomy: {
+    title: 'Loomy 管理使用指南',
+    subtitle: '把本机 Loomy 登录态的每日赠送积分，以 OpenAI 协议给其他 agent 用',
+    steps: [
+      {
+        title: '确认 Loomy 已登录',
+        desc: '先打开 Loomy 桌面客户端并登录（手机号验证码）。登录态由 Loomy 自己保存在本机（明文 session 文件），本页会自动读到，无需手动导入。',
+      },
+      {
+        title: '开启反向代理',
+        desc: '打开总开关，系统会自动生成调用 Key。把其他 agent（Cherry Studio、Cline 等 OpenAI 兼容客户端）的 base_url 指到页面显示的端点地址、api_key 填本页的 Key，即可用 Loomy 的免费积分对话。',
+      },
+      {
+        title: '测一下通不通',
+        desc: '点「测试上游连通」：用当前登录态向上游发一条最小请求。回复正常说明凭据与网络都没问题；报 401 说明登录态过期，打开 Loomy 重新登录即可，反代会自动跟随新登录态。',
+      },
+      {
+        title: '选模型',
+        desc: '模型清单读取自 Loomy 客户端的配置，名称里的倍率就是积分消耗倍数（如 x0.8 比 x2.5 省）；每天打开 Loomy 客户端会送积分，额度以官方为准。',
+      },
+    ],
+    tips: [
+      '上游为讯飞 Loomy 的 OpenAI 兼容端点，本反代属于第三方使用，存在被风控限制的风险，请自行评估；凭据只在本机使用，不会发给除 Loomy 官方以外的任何地方。',
+      '上游免费通道首字节延迟波动很大（实测 40–120 秒）：请把客户端超时设长一些，等不到回复时先耐心等，不要频繁重试。',
+      '非流式请求在反代内部统一走上游流式接口再聚合成完整响应——上游的非流式模式会长时间挂起，这是实测结论，不是 bug。',
+      '请求太快可能触发风控：调大「最小请求间隔」；请求日志只存内存，不含消息正文。',
     ],
   },
 

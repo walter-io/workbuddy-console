@@ -237,7 +237,7 @@ export default function NetPlatformDetail({
               href={p.homepage}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex h-8 items-center gap-1.5 rounded-xl bg-white px-3 text-xs text-zinc-700 border border-zinc-200 shadow-sm shadow-zinc-900/5 transition-all duration-150 hover:bg-zinc-50 hover:border-zinc-300 active:scale-[0.98]"
+              className="inline-flex h-8 items-center gap-1.5 rounded-xl bg-white px-3 text-xs text-zinc-700 border border-zinc-200 shadow-sm shadow-zinc-900/5 transition-all duration-150 hover:bg-zinc-50 hover:border-zinc-300"
             >
               <IconExternalLink className="w-3.5 h-3.5" />
               {p.kind === 'client' ? '下载页' : '官网'}

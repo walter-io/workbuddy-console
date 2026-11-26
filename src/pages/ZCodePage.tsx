@@ -1,4 +1,4 @@
-import { Card, IconChart, IconSettings, IconSwitch, IconUsers, IconWallet, Segmented } from '../components/ui';
+import { Card, IconChart, IconSettings, IconSwitch, IconUsers, IconWallet, Note, Segmented } from '../components/ui';
 import ZCodeAccountsPage from './zcode/ZCodeAccountsPage';
 import ZCodeStatsPage from './zcode/ZCodeStatsPage';
 import ZCodeQuotaPage from './zcode/ZCodeQuotaPage';
@@ -60,6 +60,11 @@ export default function ZCodePage({
           )}
         </div>
       </Card>
+
+      <Note tone="amber" title="官方免费活动已结束">
+        ZCode 官方的免费赠送活动已下线，不再发放新的活动额度；此前已到账的额度仍可正常使用，剩余量与到期时间以「额度统计」页签显示为准。
+        页面里如出现领取入口失效或赠送额度不再更新，属正常现象，不是本工具故障。
+      </Note>
 
       <div className={tab === 'accounts' ? '' : 'hidden'}>
         <ZCodeAccountsPage />

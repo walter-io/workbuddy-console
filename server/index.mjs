@@ -1950,10 +1950,13 @@ import {
   netCheckinBusy,
   runEpoch,
   tailLogs,
+  pushLog,
   fillClientRunning,
   platformDetail,
 } from './netcheckin/runner.mjs';
 import { loadConfig as loadNetCheckinConfig, saveConfigAsync as saveNetCheckinConfig, resolvePlatforms as resolveNetPlatforms } from './netcheckin/store.mjs';
+import { runClientOpen } from './netcheckin/engines.mjs';
+import { clientProbe, isClientRunning, quitClientGracefully } from './netcheckin/registry.mjs';
 import { startLogin, cancelLogin, loginState } from './netcheckin/login.mjs';
 import { startNetCheckinScheduler, nextWindowAt } from './netcheckin/scheduler.mjs';
 
@@ -1994,6 +1997,39 @@ app.post(
     // 异步启动；netCheckinBusy 的置位发生在本次调用的同步段，不会有并发窗口
     void runNetCheckin({ only, dryRun: Boolean(req.body?.dryRun), source: 'manual' });
     res.json({ started: true });
+  })
+);
+
+/** 只打开平台客户端（不接管、不签到、不占浏览器锁）：给「豆包管理」等独立页的启动入口。
+ *  已在运行 / 未安装等情况由引擎给出明确结论，不重复拉起。 */
+app.post(
+  '/api/netcheckin/open-client',
+  wrap(async (req, res) => {
+    const id = String(req.body?.id || '');
+    const cfg = loadNetCheckinConfig();
+    const platform = resolveNetPlatforms(cfg).find((p) => p.id === id);
+    if (!platform) return res.status(400).json({ error: `没有这个平台: ${id}` });
+    const logger = { info: (text) => pushLog('info', String(text)), warn: (text) => pushLog('warn', String(text)) };
+    const r = await runClientOpen(platform, { logger });
+    res.json(r);
+  })
+);
+
+/** 温和关闭平台客户端（先关窗口、超时再强杀、等进程树拆干净）：豆包这类客户端
+ *  签到平台偶尔会残留进程，下次 CDP 接管前需要干净状态。复用签到的退出逻辑。 */
+app.post(
+  '/api/netcheckin/close-client',
+  wrap(async (req, res) => {
+    const id = String(req.body?.id || '');
+    const cfg = loadNetCheckinConfig();
+    const platform = resolveNetPlatforms(cfg).find((p) => p.id === id);
+    if (!platform) return res.status(400).json({ error: `没有这个平台: ${id}` });
+    const probe = clientProbe(platform);
+    const exe = probe.exe && !probe.launcherOnly ? probe.exe : '';
+    if (!exe) return res.json({ ok: false, detail: `没有找到 ${platform.name} 客户端主程序，无需关闭` });
+    await quitClientGracefully(exe);
+    const stillRunning = await isClientRunning(exe);
+    res.json({ ok: !stillRunning, detail: stillRunning ? '关闭指令已发出，但进程仍在运行（可能被系统托盘拉起）' : `已关闭 ${platform.name} 客户端` });
   })
 );
 
@@ -2091,6 +2127,13 @@ registerZcodeRoutes(app, { port: PORT, wrap });
 
 // 必须挂在静态资源与 SPA 兜底之前，否则 /v1/* 会被 index.html 吃掉
 registerProxyRoutes(app, { port: PORT });
+
+/* ---------------- Loomy管理（反向代理：讯飞 Loomy 免费额度以 OpenAI 协议暴露） ---------------- */
+
+// 必须挂在静态资源与 SPA 兜底之前；内部再挂 /v1L/* 数据面，配置独立 cfg.loomyProxy
+import { registerLoomyRoutes, startLoomySessionWatcher } from './loomy/loomyProxy.mjs';
+registerLoomyRoutes(app, { port: PORT });
+startLoomySessionWatcher(() => {});
 
 /* ---------------- 账号包导出/导入（跨机迁移账号） ---------------- */
 
